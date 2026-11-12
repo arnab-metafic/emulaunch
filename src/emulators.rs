@@ -29,25 +29,23 @@ pub struct AndroidEmulator {
 }
 
 #[derive(Debug, Clone)]
-pub struct IOSSimulator {
+pub struct IosSimulator {
   pub name: String,
   pub udid: String,
   pub state: String,
   pub runtime: String,
 }
 
-#[allow(clippy::upper_case_acronyms)]
 pub enum EmulatorType {
   Android(String),
-  IOS(String),
+  Ios(String),
 }
 
 /// A unified entry for display in the TUI list
-#[allow(clippy::upper_case_acronyms)]
 pub enum EmulatorEntry {
   SectionHeader(String),
   Android(AndroidEmulator),
-  IOS(IOSSimulator),
+  Ios(IosSimulator),
 }
 
 impl EmulatorEntry {
@@ -55,7 +53,7 @@ impl EmulatorEntry {
     match self {
       EmulatorEntry::SectionHeader(s) => s,
       EmulatorEntry::Android(e) => &e.name,
-      EmulatorEntry::IOS(s) => &s.name,
+      EmulatorEntry::Ios(s) => &s.name,
     }
   }
 
@@ -69,7 +67,7 @@ impl fmt::Display for EmulatorEntry {
     match self {
       EmulatorEntry::SectionHeader(s) => write!(f, "{}", s),
       EmulatorEntry::Android(e) => write!(f, "{} [{}] ({})", e.name, e.state, e.device_type),
-      EmulatorEntry::IOS(s) => write!(f, "{} [{}] ({})", s.name, s.state, s.runtime),
+      EmulatorEntry::Ios(s) => write!(f, "{} [{}] ({})", s.name, s.state, s.runtime),
     }
   }
 }
@@ -284,7 +282,7 @@ fn list_android_devices_via_adb() -> Result<Vec<AndroidEmulator>, String> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn list_ios_simulators() -> Result<Vec<IOSSimulator>, String> {
+pub fn list_ios_simulators() -> Result<Vec<IosSimulator>, String> {
   let xcrun = get_xcrun_cmd()?;
 
   let output = std::process::Command::new(&xcrun)
@@ -304,7 +302,7 @@ pub fn list_ios_simulators() -> Result<Vec<IOSSimulator>, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn list_ios_simulators() -> Result<Vec<IOSSimulator>, String> {
+pub fn list_ios_simulators() -> Result<Vec<IosSimulator>, String> {
   Err(ERR_IOS_ONLY_MACOS.to_string())
 }
 
@@ -336,7 +334,7 @@ fn pretty_runtime(identifier: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn parse_ios_simulators(json: &str) -> Result<Vec<IOSSimulator>, String> {
+fn parse_ios_simulators(json: &str) -> Result<Vec<IosSimulator>, String> {
   #[derive(serde::Deserialize)]
   struct DevicesResponse {
     devices: serde_json::Value,
@@ -362,7 +360,7 @@ fn parse_ios_simulators(json: &str) -> Result<Vec<IOSSimulator>, String> {
           };
 
           if matches!(state, STATE_BOOTED | STATE_SHUTDOWN | STATE_AVAILABLE) {
-            simulators.push(IOSSimulator {
+            simulators.push(IosSimulator {
               name: name.to_string(),
               udid: udid.to_string(),
               state: state.to_string(),
@@ -538,7 +536,7 @@ pub fn find_emulator(name: &str) -> Result<EmulatorType, String> {
 
   if let Ok(ios) = list_ios_simulators() {
     if let Some(sim) = ios.iter().find(|s| s.name == name || s.udid == name) {
-      return Ok(EmulatorType::IOS(sim.udid.clone()));
+      return Ok(EmulatorType::Ios(sim.udid.clone()));
     }
   }
 
@@ -574,7 +572,7 @@ pub fn collect_all_entries() -> Collected {
       entries.push(EmulatorEntry::SectionHeader(
         SECTION_IOS_SIMULATORS.to_string(),
       ));
-      entries.extend(ios.into_iter().map(EmulatorEntry::IOS));
+      entries.extend(ios.into_iter().map(EmulatorEntry::Ios));
     }
     Ok(_) => {}
     Err(e) if e == ERR_IOS_ONLY_MACOS => {}
@@ -588,7 +586,7 @@ pub fn collect_all_entries() -> Collected {
 pub fn open_entry(entry: &EmulatorEntry) -> Result<String, String> {
   match entry {
     EmulatorEntry::Android(e) => open_android_emulator(&e.id),
-    EmulatorEntry::IOS(s) => open_ios_simulator(&s.udid),
+    EmulatorEntry::Ios(s) => open_ios_simulator(&s.udid),
     EmulatorEntry::SectionHeader(_) => Err("Cannot open a section header".to_string()),
   }
 }

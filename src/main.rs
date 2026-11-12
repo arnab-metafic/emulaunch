@@ -49,7 +49,7 @@ fn main() {
             std::process::exit(1);
           }
         },
-        Ok(EmulatorType::IOS(udid)) => match emulators::open_ios_simulator(&udid) {
+        Ok(EmulatorType::Ios(udid)) => match emulators::open_ios_simulator(&udid) {
           Ok(msg) => println!("{}", msg),
           Err(e) => {
             eprintln!("Error: {}", e);
@@ -215,7 +215,7 @@ fn get_detail_data(app: &App) -> Option<DetailData> {
         ("Type".to_string(), e.device_type.clone()),
       ],
     }),
-    EmulatorEntry::IOS(s) => Some(DetailData {
+    EmulatorEntry::Ios(s) => Some(DetailData {
       kind: "iOS Simulator".to_string(),
       fields: vec![
         ("Name".to_string(), s.name.clone()),
@@ -367,7 +367,7 @@ fn run_app(
                 ),
               ]))
             }
-            EmulatorEntry::IOS(s) => {
+            EmulatorEntry::Ios(s) => {
               let state_dot = if s.state == emulators::STATE_BOOTED {
                 "● "
               } else {
