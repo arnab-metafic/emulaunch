@@ -168,28 +168,9 @@ pub fn load_config() -> Option<Config> {
   None
 }
 
-fn command_exists(cmd: &str) -> bool {
-  #[cfg(target_os = "windows")]
-  {
-    std::process::Command::new("where")
-      .arg(cmd)
-      .output()
-      .map(|o| o.status.success())
-      .unwrap_or(false)
-  }
-
-  #[cfg(not(target_os = "windows"))]
-  {
-    std::process::Command::new("which")
-      .arg(cmd)
-      .output()
-      .map(|o| o.status.success())
-      .unwrap_or(false)
-  }
-}
-
-fn file_exists(path: &str) -> bool {
-  PathBuf::from(path).exists()
+/// True if `cmd` is a bare command found on PATH or a path to an executable file.
+fn is_runnable(cmd: &str) -> bool {
+  which::which(cmd).is_ok()
 }
 
 /// Generic command resolution helper
@@ -206,7 +187,7 @@ where
   // Check config first
   if let Some(config) = load_config() {
     if let Some(cmd) = config_key(&config) {
-      if command_exists(cmd) || file_exists(cmd) {
+      if is_runnable(cmd) {
         return Ok(cmd.to_string());
       }
     }
@@ -214,7 +195,7 @@ where
 
   // Check environment variable
   if let Ok(cmd) = std::env::var(env_var) {
-    if command_exists(&cmd) || file_exists(&cmd) {
+    if is_runnable(&cmd) {
       return Ok(cmd);
     }
   }
@@ -227,7 +208,7 @@ where
   }
 
   // Fall back to simple command name
-  if command_exists(default_cmd) {
+  if is_runnable(default_cmd) {
     return Ok(default_cmd.to_string());
   }
 
