@@ -275,3 +275,98 @@ pub fn get_xcrun_cmd() -> Result<String, CommandNotFoundError> {
     },
   )
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn the_documented_config_file_parses() {
+    let config: Config = toml::from_str(
+      r##"
+        android_emulator_cmd = "/sdk/emulator/emulator"
+        adb_cmd = "/sdk/platform-tools/adb"
+        xcrun_cmd = "/usr/bin/xcrun"
+        theme = "dracula"
+
+        [theme_overrides]
+        header_fg = "#ff00ff"
+        selection_bg = "#202020"
+      "##,
+    )
+    .unwrap();
+
+    assert_eq!(
+      config.android_emulator_cmd.as_deref(),
+      Some("/sdk/emulator/emulator")
+    );
+    assert_eq!(config.adb_cmd.as_deref(), Some("/sdk/platform-tools/adb"));
+    assert_eq!(config.xcrun_cmd.as_deref(), Some("/usr/bin/xcrun"));
+    assert_eq!(config.theme.as_deref(), Some("dracula"));
+
+    let overrides = config.theme_overrides.unwrap();
+    assert_eq!(overrides.header_fg.as_deref(), Some("#ff00ff"));
+    assert_eq!(overrides.selection_bg.as_deref(), Some("#202020"));
+    assert_eq!(overrides.name_fg, None);
+  }
+
+  #[test]
+  fn an_empty_config_file_means_all_defaults() {
+    let config: Config = toml::from_str("").unwrap();
+    assert!(config.android_emulator_cmd.is_none());
+    assert!(config.adb_cmd.is_none());
+    assert!(config.xcrun_cmd.is_none());
+    assert!(config.theme.is_none());
+    assert!(config.theme_overrides.is_none());
+  }
+
+  #[test]
+  fn unknown_keys_are_tolerated() {
+    let config: Config = toml::from_str("adb_cmd = \"adb\"\nsome_future_option = true\n").unwrap();
+    assert_eq!(config.adb_cmd.as_deref(), Some("adb"));
+  }
+
+  #[test]
+  fn values_of_the_wrong_type_are_an_error() {
+    assert!(toml::from_str::<Config>("adb_cmd = 42").is_err());
+    assert!(toml::from_str::<Config>("adb_cmd = [").is_err());
+  }
+
+  #[test]
+  fn config_files_are_searched_in_priority_order() {
+    let paths = get_config_paths();
+    // Needs a home directory, which CI runners have
+    if dirs::home_dir().is_none() {
+      return;
+    }
+    let first = paths.first().unwrap();
+    let last = paths.last().unwrap();
+    assert!(
+      first.ends_with(".config/emulaunch/config.toml"),
+      "{:?}",
+      first
+    );
+    assert!(last.ends_with(".emulaunch/config.toml"), "{:?}", last);
+  }
+
+  #[test]
+  fn sdk_tool_paths_have_the_platform_executable_suffix() {
+    for path in android_sdk_tool_paths("platform-tools/adb") {
+      let name = path.file_name().unwrap().to_string_lossy().into_owned();
+      assert_eq!(name, format!("adb{}", std::env::consts::EXE_SUFFIX));
+      assert!(path.parent().unwrap().ends_with("platform-tools"));
+    }
+  }
+
+  #[test]
+  fn command_not_found_errors_name_the_tool_and_how_to_configure_it() {
+    let err = CommandNotFoundError::Adb {
+      suggestion: "hint".to_string(),
+    }
+    .to_string();
+    assert!(err.contains("ADB command not found"));
+    assert!(err.contains("hint"));
+    assert!(err.contains("ADB_CMD"));
+    assert!(err.contains("config.toml"));
+  }
+}

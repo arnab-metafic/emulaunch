@@ -6,7 +6,7 @@ mod theme;
 use clap::{Parser, Subcommand};
 use emulators::{Device, Platform, State};
 use ratatui::{
-  crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+  crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
   layout::{Constraint, Layout, Rect},
   style::{Modifier, Style},
   text::{Line, Span},
@@ -112,11 +112,16 @@ impl App {
     self.devices.get(index)
   }
 
-  /// Reload the device list in-place, keeping the same device selected if it
-  /// is still listed.
+  /// Reload the device list in-place.
   fn reload(&mut self) {
+    self.replace_devices(emulators::collect_devices().devices);
+  }
+
+  /// Swap in a new device list, keeping the same device selected if it is
+  /// still listed.
+  fn replace_devices(&mut self, devices: Vec<Device>) {
     let previous = self.selected_device().map(|d| (d.platform, d.id.clone()));
-    self.devices = emulators::collect_devices().devices;
+    self.devices = devices;
     self.apply_filter();
 
     if let Some((platform, id)) = previous {
@@ -128,6 +133,92 @@ impl App {
       }
     }
   }
+
+  /// Update the state for one key press and say what the event loop should do.
+  fn handle_key(&mut self, key: KeyEvent) -> Action {
+    // When the help overlay is open, only handle overlay-dismissal keys
+    if self.show_help {
+      if matches!(
+        key.code,
+        KeyCode::Esc | KeyCode::Char('q' | '?') | KeyCode::F(1)
+      ) {
+        self.show_help = false;
+      }
+      return Action::Continue;
+    }
+
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+      KeyCode::Esc => return Action::Quit,
+      KeyCode::Char('c') if ctrl => return Action::Quit,
+      KeyCode::Char('?') if self.filter.is_empty() => self.show_help = true,
+      KeyCode::F(1) => self.show_help = true,
+      KeyCode::Char('r') if ctrl => return Action::Reload,
+      KeyCode::F(5) => return Action::Reload,
+      KeyCode::Char('u') if ctrl => {
+        self.filter.clear();
+        self.apply_filter();
+      }
+      KeyCode::Char('n') if ctrl => self.move_selection(1),
+      KeyCode::Char('p') if ctrl => self.move_selection(-1),
+      KeyCode::Down => self.move_selection(1),
+      KeyCode::Up => self.move_selection(-1),
+      KeyCode::Enter if self.selected_device().is_some() => return Action::Open,
+      KeyCode::Backspace => {
+        self.filter.pop();
+        self.apply_filter();
+      }
+      // Ignore other Ctrl/Alt chords so they don't end up in the filter
+      KeyCode::Char(_)
+        if key
+          .modifiers
+          .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {}
+      KeyCode::Char(c) => {
+        self.filter.push(c);
+        self.apply_filter();
+      }
+      _ => {}
+    }
+    Action::Continue
+  }
+}
+
+/// What the event loop should do after a key press.
+#[derive(Debug, PartialEq, Eq)]
+enum Action {
+  Continue,
+  Quit,
+  /// Re-list the devices.
+  Reload,
+  /// Launch the selected device and exit.
+  Open,
+}
+
+/// Build the list rows: a heading whenever the platform changes, then the
+/// device. Devices are grouped by platform, so this yields one heading per
+/// group. Also returns the row to highlight for the `selected` position
+/// within `filtered`.
+fn list_rows<'a>(
+  devices: &'a [Device],
+  filtered: &[usize],
+  selected: usize,
+  theme: &theme::ThemeColors,
+) -> (Vec<ListItem<'a>>, Option<usize>) {
+  let mut items = Vec::new();
+  let mut selected_row = None;
+  let mut group: Option<Platform> = None;
+  for (pos, &index) in filtered.iter().enumerate() {
+    let device = &devices[index];
+    if group != Some(device.platform) {
+      group = Some(device.platform);
+      items.push(header_row(device.platform, theme));
+    }
+    if pos == selected {
+      selected_row = Some(items.len());
+    }
+    items.push(device_row(device, theme));
+  }
+  (items, selected_row)
 }
 
 fn state_color(state: &State, theme: &theme::ThemeColors) -> ratatui::style::Color {
@@ -369,22 +460,7 @@ fn run_app(
         format!(" Emulators ({}/{}) ", app.filtered.len(), app.devices.len())
       };
 
-      // Rows: a heading whenever the platform changes, then the device. The
-      // devices are grouped by platform, so this yields one heading per group.
-      let mut items: Vec<ListItem> = Vec::new();
-      let mut selected_row = None;
-      let mut group: Option<Platform> = None;
-      for (pos, &index) in app.filtered.iter().enumerate() {
-        let device = &app.devices[index];
-        if group != Some(device.platform) {
-          group = Some(device.platform);
-          items.push(header_row(device.platform, theme));
-        }
-        if pos == app.selected {
-          selected_row = Some(items.len());
-        }
-        items.push(device_row(device, theme));
-      }
+      let (items, selected_row) = list_rows(&app.devices, &app.filtered, app.selected, theme);
       app.list_state.select(selected_row);
 
       let list = List::new(items)
@@ -434,65 +510,388 @@ fn run_app(
           continue;
         }
 
-        // When the help overlay is open, only handle overlay-dismissal keys
-        if app.show_help {
-          match key.code {
-            KeyCode::Esc | KeyCode::Char('q' | '?') | KeyCode::F(1) => {
-              app.show_help = false;
-            }
-            _ => {}
-          }
-          continue;
-        }
-
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-          KeyCode::Esc => break,
-          KeyCode::Char('c') if ctrl => break,
-          KeyCode::Char('?') if app.filter.is_empty() => app.show_help = true,
-          KeyCode::F(1) => app.show_help = true,
-          KeyCode::Char('r') if ctrl => app.reload(),
-          KeyCode::F(5) => app.reload(),
-          KeyCode::Char('u') if ctrl => {
-            app.filter.clear();
-            app.apply_filter();
-          }
-          KeyCode::Char('n') if ctrl => app.move_selection(1),
-          KeyCode::Char('p') if ctrl => app.move_selection(-1),
-          KeyCode::Down => app.move_selection(1),
-          KeyCode::Up => app.move_selection(-1),
-          KeyCode::Enter => {
+        match app.handle_key(key) {
+          Action::Continue => {}
+          Action::Quit => break,
+          Action::Reload => app.reload(),
+          Action::Open => {
             if let Some(device) = app.selected_device() {
-              match device.open() {
-                Ok(msg) => {
-                  app.result_message = Some(msg);
-                  break;
-                }
-                Err(e) => {
-                  app.result_message = Some(format!("Error: {}", e));
-                  break;
-                }
-              }
+              let message = match device.open() {
+                Ok(msg) => msg,
+                Err(e) => format!("Error: {}", e),
+              };
+              app.result_message = Some(message);
             }
+            break;
           }
-          KeyCode::Backspace => {
-            app.filter.pop();
-            app.apply_filter();
-          }
-          // Ignore other Ctrl/Alt chords so they don't end up in the filter
-          KeyCode::Char(_)
-            if key
-              .modifiers
-              .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {}
-          KeyCode::Char(c) => {
-            app.filter.push(c);
-            app.apply_filter();
-          }
-          _ => {}
         }
       }
     }
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use clap::CommandFactory;
+  use emulators::State;
+
+  fn device(platform: Platform, name: &str, id: &str) -> Device {
+    Device {
+      platform,
+      name: name.to_string(),
+      id: id.to_string(),
+      state: State::Shutdown,
+      meta: String::new(),
+    }
+  }
+
+  fn android(name: &str, id: &str) -> Device {
+    device(Platform::Android, name, id)
+  }
+
+  fn ios(name: &str, id: &str) -> Device {
+    device(Platform::Ios, name, id)
+  }
+
+  /// Two Android devices followed by one iOS device.
+  fn sample_app() -> App {
+    App::new(vec![
+      android("Pixel 8", "pixel8"),
+      android("Resizable", "resizable"),
+      ios("iPhone 17", "UDID-1"),
+    ])
+  }
+
+  fn names(app: &App) -> Vec<&str> {
+    app
+      .filtered
+      .iter()
+      .map(|&i| app.devices[i].name.as_str())
+      .collect()
+  }
+
+  fn press(app: &mut App, code: KeyCode) -> Action {
+    app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+  }
+
+  fn press_with(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Action {
+    app.handle_key(KeyEvent::new(code, modifiers))
+  }
+
+  fn type_text(app: &mut App, text: &str) {
+    for c in text.chars() {
+      assert_eq!(press(app, KeyCode::Char(c)), Action::Continue);
+    }
+  }
+
+  // --- filtering -------------------------------------------------------
+
+  #[test]
+  fn everything_is_listed_without_a_filter() {
+    let app = sample_app();
+    assert_eq!(names(&app), vec!["Pixel 8", "Resizable", "iPhone 17"]);
+    assert_eq!(app.selected_device().unwrap().name, "Pixel 8");
+  }
+
+  #[test]
+  fn filter_is_a_case_insensitive_substring_match() {
+    let mut app = sample_app();
+    type_text(&mut app, "PHONE");
+    assert_eq!(names(&app), vec!["iPhone 17"]);
+  }
+
+  #[test]
+  fn filter_with_no_match_selects_nothing() {
+    let mut app = sample_app();
+    type_text(&mut app, "zzz");
+    assert!(app.filtered.is_empty());
+    assert!(app.selected_device().is_none());
+  }
+
+  #[test]
+  fn changing_the_filter_selects_the_first_match() {
+    let mut app = sample_app();
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
+    type_text(&mut app, "e");
+    assert_eq!(app.selected, 0);
+  }
+
+  // --- selection -------------------------------------------------------
+
+  #[test]
+  fn selection_stops_at_both_ends() {
+    let mut app = sample_app();
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.selected, 0);
+    for _ in 0..10 {
+      press(&mut app, KeyCode::Down);
+    }
+    assert_eq!(app.selected, 2);
+    assert_eq!(app.selected_device().unwrap().name, "iPhone 17");
+  }
+
+  #[test]
+  fn moving_in_an_empty_list_does_nothing() {
+    let mut app = App::new(Vec::new());
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.selected, 0);
+    assert!(app.selected_device().is_none());
+  }
+
+  #[test]
+  fn refresh_keeps_the_same_device_selected_when_the_order_changes() {
+    let mut app = sample_app();
+    press(&mut app, KeyCode::Down); // Resizable
+    app.replace_devices(vec![
+      ios("iPhone 17", "UDID-1"),
+      android("Resizable", "resizable"),
+      android("Pixel 8", "pixel8"),
+    ]);
+    assert_eq!(app.selected_device().unwrap().id, "resizable");
+  }
+
+  #[test]
+  fn refresh_tells_apart_devices_with_the_same_name() {
+    let mut app = App::new(vec![ios("iPhone 17", "UDID-1"), ios("iPhone 17", "UDID-2")]);
+    press(&mut app, KeyCode::Down); // second iPhone 17
+    assert_eq!(app.selected_device().unwrap().id, "UDID-2");
+
+    // UDID-2 is no longer first, and another device with the same name now
+    // precedes it, so matching by name (or platform) alone would pick wrongly.
+    app.replace_devices(vec![
+      ios("iPhone 17", "UDID-1"),
+      ios("iPhone 17", "UDID-3"),
+      ios("iPhone 17", "UDID-2"),
+    ]);
+    assert_eq!(app.selected_device().unwrap().id, "UDID-2");
+  }
+
+  #[test]
+  fn refresh_selects_the_first_device_when_the_selected_one_is_gone() {
+    let mut app = sample_app();
+    press(&mut app, KeyCode::Down);
+    app.replace_devices(vec![android("Pixel 8", "pixel8")]);
+    assert_eq!(app.selected_device().unwrap().id, "pixel8");
+  }
+
+  // --- rows ------------------------------------------------------------
+
+  #[test]
+  fn rows_have_one_heading_per_platform() {
+    let app = sample_app();
+    let theme = theme::resolve_theme(None, None);
+    let (rows, selected) = list_rows(&app.devices, &app.filtered, 0, &theme);
+
+    // Android heading, 2 Android devices, iOS heading, 1 iOS device
+    assert_eq!(rows.len(), 5);
+    assert_eq!(selected, Some(1));
+  }
+
+  #[test]
+  fn selected_row_accounts_for_headings() {
+    let app = sample_app();
+    let theme = theme::resolve_theme(None, None);
+
+    assert_eq!(list_rows(&app.devices, &app.filtered, 1, &theme).1, Some(2));
+    // Third device sits below the iOS heading
+    assert_eq!(list_rows(&app.devices, &app.filtered, 2, &theme).1, Some(4));
+  }
+
+  #[test]
+  fn rows_omit_headings_of_filtered_out_platforms() {
+    let mut app = sample_app();
+    type_text(&mut app, "iphone");
+    let theme = theme::resolve_theme(None, None);
+    let (rows, selected) = list_rows(&app.devices, &app.filtered, app.selected, &theme);
+
+    assert_eq!(rows.len(), 2); // iOS heading + the device
+    assert_eq!(selected, Some(1));
+  }
+
+  #[test]
+  fn no_rows_and_no_selection_when_nothing_matches() {
+    let mut app = sample_app();
+    type_text(&mut app, "zzz");
+    let theme = theme::resolve_theme(None, None);
+    let (rows, selected) = list_rows(&app.devices, &app.filtered, app.selected, &theme);
+
+    assert!(rows.is_empty());
+    assert_eq!(selected, None);
+  }
+
+  // --- keys ------------------------------------------------------------
+
+  #[test]
+  fn former_command_letters_are_typed_into_the_filter() {
+    // Regression: j, k, q and r used to be commands while the filter was empty,
+    // so an emulator named "Resizable" could not be searched for.
+    let mut app = sample_app();
+    type_text(&mut app, "res");
+    assert_eq!(app.filter, "res");
+    assert_eq!(names(&app), vec!["Resizable"]);
+
+    let mut app = sample_app();
+    for c in ['q', 'j', 'k', 'r'] {
+      assert_eq!(press(&mut app, KeyCode::Char(c)), Action::Continue);
+    }
+    assert_eq!(app.filter, "qjkr");
+  }
+
+  #[test]
+  fn escape_and_ctrl_c_quit() {
+    let mut app = sample_app();
+    assert_eq!(press(&mut app, KeyCode::Esc), Action::Quit);
+    assert_eq!(
+      press_with(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL),
+      Action::Quit
+    );
+  }
+
+  #[test]
+  fn plain_c_is_typed_not_quit() {
+    let mut app = sample_app();
+    assert_eq!(press(&mut app, KeyCode::Char('c')), Action::Continue);
+    assert_eq!(app.filter, "c");
+  }
+
+  #[test]
+  fn ctrl_r_and_f5_reload_but_plain_r_does_not() {
+    let mut app = sample_app();
+    assert_eq!(
+      press_with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL),
+      Action::Reload
+    );
+    assert_eq!(press(&mut app, KeyCode::F(5)), Action::Reload);
+    assert_eq!(press(&mut app, KeyCode::Char('r')), Action::Continue);
+    assert_eq!(app.filter, "r");
+  }
+
+  #[test]
+  fn ctrl_n_and_ctrl_p_and_arrows_move_the_selection() {
+    let mut app = sample_app();
+    press_with(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+    assert_eq!(app.selected, 1);
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.selected, 2);
+    press_with(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+    assert_eq!(app.selected, 1);
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.selected, 0);
+  }
+
+  #[test]
+  fn backspace_and_ctrl_u_edit_the_filter() {
+    let mut app = sample_app();
+    type_text(&mut app, "pix");
+    press(&mut app, KeyCode::Backspace);
+    assert_eq!(app.filter, "pi");
+
+    press_with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+    assert_eq!(app.filter, "");
+    assert_eq!(app.filtered.len(), 3);
+  }
+
+  #[test]
+  fn other_control_chords_are_ignored() {
+    // Ctrl+J is the same byte as Enter in a terminal; it must never be typed
+    // into the filter or launch anything.
+    let mut app = sample_app();
+    for (c, modifier) in [
+      ('j', KeyModifiers::CONTROL),
+      ('w', KeyModifiers::CONTROL),
+      ('x', KeyModifiers::ALT),
+    ] {
+      assert_eq!(
+        press_with(&mut app, KeyCode::Char(c), modifier),
+        Action::Continue
+      );
+    }
+    assert_eq!(app.filter, "");
+  }
+
+  #[test]
+  fn enter_opens_the_selected_device_only_when_there_is_one() {
+    let mut app = sample_app();
+    assert_eq!(press(&mut app, KeyCode::Enter), Action::Open);
+
+    type_text(&mut app, "zzz");
+    assert_eq!(press(&mut app, KeyCode::Enter), Action::Continue);
+  }
+
+  #[test]
+  fn question_mark_opens_help_only_while_the_filter_is_empty() {
+    let mut app = sample_app();
+    press(&mut app, KeyCode::Char('?'));
+    assert!(app.show_help);
+
+    let mut app = sample_app();
+    type_text(&mut app, "a?");
+    assert!(!app.show_help);
+    assert_eq!(app.filter, "a?");
+
+    let mut app = sample_app();
+    press(&mut app, KeyCode::F(1));
+    assert!(app.show_help);
+  }
+
+  #[test]
+  fn help_overlay_swallows_keys_and_is_dismissed_without_quitting() {
+    let mut app = sample_app();
+    app.show_help = true;
+
+    // Typing and navigation do nothing while the overlay is open
+    assert_eq!(press(&mut app, KeyCode::Char('x')), Action::Continue);
+    assert_eq!(press(&mut app, KeyCode::Down), Action::Continue);
+    assert_eq!(app.filter, "");
+    assert_eq!(app.selected, 0);
+    assert!(app.show_help);
+
+    // Esc closes the overlay instead of quitting
+    assert_eq!(press(&mut app, KeyCode::Esc), Action::Continue);
+    assert!(!app.show_help);
+
+    for key in [KeyCode::Char('q'), KeyCode::Char('?'), KeyCode::F(1)] {
+      app.show_help = true;
+      assert_eq!(press(&mut app, key), Action::Continue);
+      assert!(!app.show_help);
+    }
+  }
+
+  // --- command line ----------------------------------------------------
+
+  #[test]
+  fn command_line_definition_is_valid() {
+    Cli::command().debug_assert();
+  }
+
+  #[test]
+  fn binary_is_called_emulaunch() {
+    assert_eq!(Cli::command().get_name(), "emulaunch");
+  }
+
+  #[test]
+  fn open_takes_a_name_that_may_contain_spaces() {
+    let cli = Cli::try_parse_from(["emulaunch", "open", "Pixel", "8", "Pro"]).unwrap();
+    match cli.command {
+      Some(Commands::Open { name }) => assert_eq!(name.join(" "), "Pixel 8 Pro"),
+      _ => panic!("expected the open command"),
+    }
+  }
+
+  #[test]
+  fn no_arguments_means_the_tui_and_list_is_a_subcommand() {
+    assert!(Cli::try_parse_from(["emulaunch"])
+      .unwrap()
+      .command
+      .is_none());
+    assert!(matches!(
+      Cli::try_parse_from(["emulaunch", "list"]).unwrap().command,
+      Some(Commands::List)
+    ));
+  }
 }

@@ -45,3 +45,6 @@ jobs:
 
       - name: cargo build
         run: cargo build --all-targets
+
+      - name: cargo test
+        run: cargo test

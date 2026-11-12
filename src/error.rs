@@ -21,7 +21,8 @@ pub enum Error {
   #[error("{tool} failed: {stderr}")]
   CommandFailed { tool: &'static str, stderr: String },
 
-  #[cfg(target_os = "macos")]
+  /// Only constructed when listing iOS simulators.
+  #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
   #[error("Failed to parse simctl JSON: {0}")]
   ParseSimctl(#[from] serde_json::Error),
 
