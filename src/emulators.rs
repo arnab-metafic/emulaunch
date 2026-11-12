@@ -350,18 +350,90 @@ fn parse_ios_simulators(json: &str) -> Result<Vec<IOSSimulator>, String> {
   Ok(simulators)
 }
 
-pub fn open_android_emulator(name: &str) -> Result<String, String> {
+/// Detach the child from our terminal's process group (and, on Windows, from
+/// our console) so closing the terminal or pressing Ctrl+C does not kill it.
+fn detach(cmd: &mut std::process::Command) {
+  #[cfg(unix)]
+  {
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
+  }
+  #[cfg(windows)]
+  {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+  }
+}
+
+/// How long to watch a freshly spawned emulator for an immediate failure.
+const LAUNCH_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Last few lines of the emulator log, for error messages.
+fn log_tail(path: &std::path::Path) -> String {
+  let contents = std::fs::read_to_string(path).unwrap_or_default();
+  let lines: Vec<&str> = contents.lines().collect();
+  lines[lines.len().saturating_sub(8)..].join("\n")
+}
+
+pub fn open_android_emulator(avd: &str) -> Result<String, String> {
   let emulator_cmd = get_android_emulator_cmd()?;
 
-  std::process::Command::new(&emulator_cmd)
-    .args(["-avd", name])
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .spawn()
-    .map_err(|e| format!("Failed to launch emulator '{}': {}", name, e))?;
+  // A second `emulator -avd` for the same AVD refuses to start
+  if get_running_avd_names()
+    .unwrap_or_default()
+    .iter()
+    .any(|n| n == avd)
+  {
+    return Err(format!("Android emulator '{}' is already running", avd));
+  }
 
-  Ok(format!("Launching Android emulator: {}", name))
+  // Send output to a log file rather than a pipe: a pipe would break (SIGPIPE)
+  // once we exit while the emulator keeps running.
+  let log_path = std::env::temp_dir().join(format!("emulaunch-{}.log", avd));
+  let log = std::fs::File::create(&log_path)
+    .map_err(|e| format!("Cannot create log file {}: {}", log_path.display(), e))?;
+  let log_err = log
+    .try_clone()
+    .map_err(|e| format!("Cannot open log file {}: {}", log_path.display(), e))?;
+
+  let mut cmd = std::process::Command::new(&emulator_cmd);
+  cmd
+    .args(["-avd", avd])
+    .stdin(Stdio::null())
+    .stdout(log)
+    .stderr(log_err);
+  detach(&mut cmd);
+
+  let mut child = cmd
+    .spawn()
+    .map_err(|e| format!("Failed to launch emulator '{}': {}", avd, e))?;
+
+  // Real startup takes much longer than this, but configuration errors (bad
+  // AVD, missing system image, ...) make the emulator exit almost immediately.
+  let deadline = std::time::Instant::now() + LAUNCH_GRACE;
+  while std::time::Instant::now() < deadline {
+    match child.try_wait() {
+      Ok(Some(status)) => {
+        return Err(format!(
+          "Emulator '{}' exited immediately ({}):\n{}\n(full log: {})",
+          avd,
+          status,
+          log_tail(&log_path),
+          log_path.display()
+        ));
+      }
+      Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+      Err(_) => break,
+    }
+  }
+
+  Ok(format!(
+    "Launching Android emulator: {} (log: {})",
+    avd,
+    log_path.display()
+  ))
 }
 
 #[cfg(target_os = "macos")]
