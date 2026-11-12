@@ -208,6 +208,73 @@ fn detail_lines<'a>(device: &'a Device, theme: &theme::ThemeColors) -> Vec<Line<
   ]
 }
 
+/// Key hints shown in the bottom bar: (key, action).
+const HELP_BAR: [(&str, &str); 5] = [
+  ("↑/↓", "navigate"),
+  ("Enter", "open"),
+  ("^R", "refresh"),
+  ("?", "help"),
+  ("Esc", "quit"),
+];
+
+/// Rows of the keyboard shortcuts popup: (keys, description).
+const SHORTCUTS: [(&str, &str); 8] = [
+  ("↑/↓ ^N/^P", "Navigate list"),
+  ("Enter", "Launch selected emulator"),
+  ("^R / F5", "Refresh emulator list"),
+  ("^U", "Clear filter"),
+  ("Type", "Filter emulators"),
+  ("Backspace", "Delete filter character"),
+  ("? / F1", "Toggle this help"),
+  ("Esc / ^C", "Quit"),
+];
+
+fn help_bar(theme: &theme::ThemeColors) -> Paragraph<'static> {
+  let key_style = Style::default().fg(theme.help_key_fg);
+  let text_style = Style::default().fg(theme.help_text_fg);
+  let last = HELP_BAR.len() - 1;
+  let spans: Vec<Span> = HELP_BAR
+    .iter()
+    .enumerate()
+    .flat_map(|(i, (key, action))| {
+      let lead = if i == 0 { " " } else { "" };
+      let trail = if i == last { "" } else { "  " };
+      [
+        Span::styled(format!("{lead}{key}"), key_style),
+        Span::styled(format!(" {action}{trail}"), text_style),
+      ]
+    })
+    .collect();
+  Paragraph::new(Line::from(spans))
+}
+
+fn shortcuts_popup(theme: &theme::ThemeColors) -> Paragraph<'static> {
+  let key_style = Style::default()
+    .fg(theme.help_key_fg)
+    .add_modifier(Modifier::BOLD);
+  let text_style = Style::default().fg(theme.help_text_fg);
+
+  let mut lines = vec![Line::from("")];
+  lines.extend(SHORTCUTS.iter().map(|(keys, description)| {
+    Line::from(vec![
+      Span::styled(format!("  {keys:<11}"), key_style),
+      Span::styled(*description, text_style),
+    ])
+  }));
+  lines.push(Line::from(""));
+
+  Paragraph::new(lines).block(
+    Block::default()
+      .borders(Borders::ALL)
+      .title(" Keyboard Shortcuts ")
+      .title_style(
+        Style::default()
+          .fg(theme.header_fg)
+          .add_modifier(Modifier::BOLD),
+      ),
+  )
+}
+
 /// Return a centered Rect of fixed `width` x `height` within `area`.
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
   let x = area.x + area.width.saturating_sub(width) / 2;
@@ -350,81 +417,12 @@ fn run_app(
         frame.render_widget(detail_widget, detail_area);
       }
 
-      // Help bar
-      let help = Paragraph::new(Line::from(vec![
-        Span::styled(" ↑/↓", Style::default().fg(theme.help_key_fg)),
-        Span::styled(" navigate  ", Style::default().fg(theme.help_text_fg)),
-        Span::styled("Enter", Style::default().fg(theme.help_key_fg)),
-        Span::styled(" open  ", Style::default().fg(theme.help_text_fg)),
-        Span::styled("^R", Style::default().fg(theme.help_key_fg)),
-        Span::styled(" refresh  ", Style::default().fg(theme.help_text_fg)),
-        Span::styled("?", Style::default().fg(theme.help_key_fg)),
-        Span::styled(" help  ", Style::default().fg(theme.help_text_fg)),
-        Span::styled("Esc", Style::default().fg(theme.help_key_fg)),
-        Span::styled(" quit", Style::default().fg(theme.help_text_fg)),
-      ]));
-      frame.render_widget(help, chunks[2]);
+      frame.render_widget(help_bar(theme), chunks[2]);
 
-      // Help overlay popup
       if app.show_help {
-        let popup_w = 46u16;
-        let popup_h = 13u16;
-        let popup_area = centered_rect(popup_w, popup_h, area);
+        let popup_area = centered_rect(46, SHORTCUTS.len() as u16 + 5, area);
         frame.render_widget(Clear, popup_area);
-
-        let key_style = Style::default()
-          .fg(theme.help_key_fg)
-          .add_modifier(Modifier::BOLD);
-        let text_style = Style::default().fg(theme.help_text_fg);
-
-        let help_lines = vec![
-          Line::from(""),
-          Line::from(vec![
-            Span::styled("  ↑/↓ ^N/^P  ", key_style),
-            Span::styled("Navigate list", text_style),
-          ]),
-          Line::from(vec![
-            Span::styled("  Enter      ", key_style),
-            Span::styled("Launch selected emulator", text_style),
-          ]),
-          Line::from(vec![
-            Span::styled("  ^R / F5    ", key_style),
-            Span::styled("Refresh emulator list", text_style),
-          ]),
-          Line::from(vec![
-            Span::styled("  ^U         ", key_style),
-            Span::styled("Clear filter", text_style),
-          ]),
-          Line::from(vec![
-            Span::styled("  Type       ", key_style),
-            Span::styled("Filter emulators", text_style),
-          ]),
-          Line::from(vec![
-            Span::styled("  Backspace  ", key_style),
-            Span::styled("Delete filter character", text_style),
-          ]),
-          Line::from(vec![
-            Span::styled("  ? / F1     ", key_style),
-            Span::styled("Toggle this help", text_style),
-          ]),
-          Line::from(vec![
-            Span::styled("  Esc / ^C   ", key_style),
-            Span::styled("Quit", text_style),
-          ]),
-          Line::from(""),
-        ];
-
-        let help_popup = Paragraph::new(help_lines).block(
-          Block::default()
-            .borders(Borders::ALL)
-            .title(" Keyboard Shortcuts ")
-            .title_style(
-              Style::default()
-                .fg(theme.header_fg)
-                .add_modifier(Modifier::BOLD),
-            ),
-        );
-        frame.render_widget(help_popup, popup_area);
+        frame.render_widget(shortcuts_popup(theme), popup_area);
       }
     })?;
 
