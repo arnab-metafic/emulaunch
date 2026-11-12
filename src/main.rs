@@ -3,7 +3,7 @@ mod emulators;
 mod theme;
 
 use clap::{Parser, Subcommand};
-use emulators::{EmulatorEntry, EmulatorType};
+use emulators::{Device, EmulatorEntry};
 use ratatui::{
   crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
   layout::{Constraint, Layout, Rect},
@@ -41,21 +41,8 @@ fn main() {
     }
     Some(Commands::Open { name }) => {
       let name = name.join(" ");
-      match emulators::find_emulator(&name) {
-        Ok(EmulatorType::Android(emu_name)) => match emulators::open_android_emulator(&emu_name) {
-          Ok(msg) => println!("{}", msg),
-          Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-          }
-        },
-        Ok(EmulatorType::Ios(udid)) => match emulators::open_ios_simulator(&udid) {
-          Ok(msg) => println!("{}", msg),
-          Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-          }
-        },
+      match emulators::find_device(&name).and_then(|device| device.open()) {
+        Ok(msg) => println!("{}", msg),
         Err(e) => {
           eprintln!("Error: {}", e);
           std::process::exit(1);
@@ -164,20 +151,18 @@ impl App {
     self.list_state.select(Some(selectable[new_pos]));
   }
 
-  fn selected_entry(&self) -> Option<&EmulatorEntry> {
+  fn selected_device(&self) -> Option<&Device> {
     let selected = self.list_state.selected()?;
     let &entry_idx = self.filtered_indices.get(selected)?;
-    let entry = &self.entries[entry_idx];
-    if entry.is_header() {
-      None
-    } else {
-      Some(entry)
+    match &self.entries[entry_idx] {
+      EmulatorEntry::Device(device) => Some(device),
+      EmulatorEntry::SectionHeader(_) => None,
     }
   }
 
   /// Reload the emulator list in-place, preserving selection by name if possible.
   fn reload(&mut self) {
-    let selected_name = self.selected_entry().map(|e| e.display_name().to_string());
+    let selected_name = self.selected_device().map(|d| d.name.clone());
     self.entries = emulators::collect_all_entries().entries;
     self.apply_filter();
 
@@ -203,29 +188,19 @@ struct DetailData {
 }
 
 fn get_detail_data(app: &App) -> Option<DetailData> {
-  let selected_pos = app.list_state.selected()?;
-  let &entry_idx = app.filtered_indices.get(selected_pos)?;
-  match &app.entries[entry_idx] {
-    EmulatorEntry::Android(e) => Some(DetailData {
-      kind: "Android Emulator".to_string(),
-      fields: vec![
-        ("Name".to_string(), e.name.clone()),
-        ("ID".to_string(), e.id.clone()),
-        ("State".to_string(), e.state.clone()),
-        ("Type".to_string(), e.device_type.clone()),
-      ],
-    }),
-    EmulatorEntry::Ios(s) => Some(DetailData {
-      kind: "iOS Simulator".to_string(),
-      fields: vec![
-        ("Name".to_string(), s.name.clone()),
-        ("UDID".to_string(), s.udid.clone()),
-        ("State".to_string(), s.state.clone()),
-        ("Runtime".to_string(), s.runtime.clone()),
-      ],
-    }),
-    EmulatorEntry::SectionHeader(_) => None,
-  }
+  let device = app.selected_device()?;
+  Some(DetailData {
+    kind: device.platform.kind().to_string(),
+    fields: vec![
+      ("Name".to_string(), device.name.clone()),
+      (device.platform.id_label().to_string(), device.id.clone()),
+      ("State".to_string(), device.state.clone()),
+      (
+        device.platform.meta_label().to_string(),
+        device.meta.clone(),
+      ),
+    ],
+  })
 }
 
 fn state_color(state: &str, theme: &theme::ThemeColors) -> ratatui::style::Color {
@@ -347,42 +322,22 @@ fn run_app(
                 .fg(theme.header_fg)
                 .add_modifier(Modifier::BOLD),
             ))),
-            EmulatorEntry::Android(e) => {
-              let state_dot = if e.state == emulators::STATE_BOOTED {
+            EmulatorEntry::Device(d) => {
+              let state_dot = if d.state == emulators::STATE_BOOTED {
                 "● "
               } else {
                 "○ "
               };
               ListItem::new(Line::from(vec![
                 Span::raw("   "),
-                Span::styled(&e.name, Style::default().fg(theme.name_fg)),
+                Span::styled(&d.name, Style::default().fg(theme.name_fg)),
                 Span::raw("  "),
                 Span::styled(
-                  format!("{}{}", state_dot, e.state),
-                  Style::default().fg(state_color(&e.state, theme)),
+                  format!("{}{}", state_dot, d.state),
+                  Style::default().fg(state_color(&d.state, theme)),
                 ),
                 Span::styled(
-                  format!("  ({})", e.device_type),
-                  Style::default().fg(theme.meta_fg),
-                ),
-              ]))
-            }
-            EmulatorEntry::Ios(s) => {
-              let state_dot = if s.state == emulators::STATE_BOOTED {
-                "● "
-              } else {
-                "○ "
-              };
-              ListItem::new(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(&s.name, Style::default().fg(theme.name_fg)),
-                Span::raw("  "),
-                Span::styled(
-                  format!("{}{}", state_dot, s.state),
-                  Style::default().fg(state_color(&s.state, theme)),
-                ),
-                Span::styled(
-                  format!("  ({})", s.runtime),
+                  format!("  ({})", d.meta),
                   Style::default().fg(theme.meta_fg),
                 ),
               ]))
@@ -575,8 +530,8 @@ fn run_app(
           KeyCode::Down => app.move_selection(1),
           KeyCode::Up => app.move_selection(-1),
           KeyCode::Enter => {
-            if let Some(entry) = app.selected_entry() {
-              match emulators::open_entry(entry) {
+            if let Some(device) = app.selected_device() {
+              match device.open() {
                 Ok(msg) => {
                   app.result_message = Some(msg);
                   break;

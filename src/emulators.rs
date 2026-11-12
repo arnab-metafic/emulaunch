@@ -9,10 +9,6 @@ pub const STATE_SHUTDOWN: &str = "Shutdown";
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const STATE_AVAILABLE: &str = "Available";
 
-// Section headers
-pub const SECTION_ANDROID_EMULATORS: &str = "Android Emulators";
-pub const SECTION_IOS_SIMULATORS: &str = "iOS Simulators";
-
 // Device types
 pub const DEVICE_TYPE_AVD: &str = "AVD";
 pub const DEVICE_TYPE_RUNNING: &str = "Running Device";
@@ -20,55 +16,90 @@ pub const DEVICE_TYPE_RUNNING: &str = "Running Device";
 // Error messages
 pub const ERR_IOS_ONLY_MACOS: &str = "iOS simulators are only available on macOS";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+  Android,
+  Ios,
+}
+
+impl Platform {
+  /// Heading for this platform's group in lists.
+  pub fn section_title(self) -> &'static str {
+    match self {
+      Platform::Android => "Android Emulators",
+      Platform::Ios => "iOS Simulators",
+    }
+  }
+
+  /// What a device of this platform is called in the detail view.
+  pub fn kind(self) -> &'static str {
+    match self {
+      Platform::Android => "Android Emulator",
+      Platform::Ios => "iOS Simulator",
+    }
+  }
+
+  pub fn id_label(self) -> &'static str {
+    match self {
+      Platform::Android => "ID",
+      Platform::Ios => "UDID",
+    }
+  }
+
+  /// Label for [`Device::meta`]: the AVD kind on Android, the runtime on iOS.
+  pub fn meta_label(self) -> &'static str {
+    match self {
+      Platform::Android => "Type",
+      Platform::Ios => "Runtime",
+    }
+  }
+}
+
+/// An Android emulator (AVD) or iOS simulator.
 #[derive(Debug, Clone)]
-pub struct AndroidEmulator {
+pub struct Device {
+  pub platform: Platform,
+  /// Display name.
   pub name: String,
+  /// What the platform tooling identifies it by: the AVD id or the simulator UDID.
   pub id: String,
-  pub device_type: String,
   pub state: String,
+  /// Platform-specific extra: the AVD kind on Android, the runtime on iOS.
+  pub meta: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct IosSimulator {
-  pub name: String,
-  pub udid: String,
-  pub state: String,
-  pub runtime: String,
+impl Device {
+  /// Launch this device.
+  pub fn open(&self) -> Result<String, String> {
+    match self.platform {
+      Platform::Android => open_android_emulator(&self.id),
+      Platform::Ios => open_ios_simulator(&self.id),
+    }
+  }
 }
 
-pub enum EmulatorType {
-  Android(String),
-  Ios(String),
+impl fmt::Display for Device {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "{} [{}] ({})", self.name, self.state, self.meta)
+  }
 }
 
-/// A unified entry for display in the TUI list
+/// A row of the TUI list: either a platform heading or a device.
 pub enum EmulatorEntry {
   SectionHeader(String),
-  Android(AndroidEmulator),
-  Ios(IosSimulator),
+  Device(Device),
 }
 
 impl EmulatorEntry {
   pub fn display_name(&self) -> &str {
     match self {
       EmulatorEntry::SectionHeader(s) => s,
-      EmulatorEntry::Android(e) => &e.name,
-      EmulatorEntry::Ios(s) => &s.name,
+      EmulatorEntry::Device(d) => &d.name,
     }
   }
 
   pub fn is_header(&self) -> bool {
     matches!(self, EmulatorEntry::SectionHeader(_))
-  }
-}
-
-impl fmt::Display for EmulatorEntry {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      EmulatorEntry::SectionHeader(s) => write!(f, "{}", s),
-      EmulatorEntry::Android(e) => write!(f, "{} [{}] ({})", e.name, e.state, e.device_type),
-      EmulatorEntry::Ios(s) => write!(f, "{} [{}] ({})", s.name, s.state, s.runtime),
-    }
   }
 }
 
@@ -158,7 +189,7 @@ fn get_running_avd_names() -> Result<Vec<String>, String> {
 }
 
 /// List AVDs by scanning ~/.android/avd/ directory
-fn list_avds_from_directory() -> Result<Vec<AndroidEmulator>, String> {
+fn list_avds_from_directory() -> Result<Vec<Device>, String> {
   let avd_dir = avd_home().ok_or_else(|| "Cannot determine AVD directory".to_string())?;
 
   let entries =
@@ -172,11 +203,12 @@ fn list_avds_from_directory() -> Result<Vec<AndroidEmulator>, String> {
         // Verify the .avd directory exists
         if avd_dir.join(format!("{}.avd", stem)).is_dir() {
           let display_name = get_avd_display_name(stem).unwrap_or_else(|| stem.to_string());
-          emulators.push(AndroidEmulator {
+          emulators.push(Device {
+            platform: Platform::Android,
             name: display_name,
             id: stem.to_string(),
-            device_type: DEVICE_TYPE_AVD.to_string(),
             state: STATE_SHUTDOWN.to_string(),
+            meta: DEVICE_TYPE_AVD.to_string(),
           });
         }
       }
@@ -190,7 +222,7 @@ fn list_avds_from_directory() -> Result<Vec<AndroidEmulator>, String> {
   }
 }
 
-pub fn list_android_emulators() -> Result<Vec<AndroidEmulator>, String> {
+pub fn list_android_emulators() -> Result<Vec<Device>, String> {
   let emulator_cmd = get_android_emulator_cmd()?;
   let running_names = get_running_avd_names().unwrap_or_default();
 
@@ -213,11 +245,12 @@ pub fn list_android_emulators() -> Result<Vec<AndroidEmulator>, String> {
             } else {
               STATE_SHUTDOWN.to_string()
             };
-            AndroidEmulator {
+            Device {
+              platform: Platform::Android,
               name,
               id,
-              device_type: DEVICE_TYPE_AVD.to_string(),
               state,
+              meta: DEVICE_TYPE_AVD.to_string(),
             }
           })
           .collect(),
@@ -239,7 +272,7 @@ pub fn list_android_emulators() -> Result<Vec<AndroidEmulator>, String> {
   Ok(emulators)
 }
 
-fn list_android_devices_via_adb() -> Result<Vec<AndroidEmulator>, String> {
+fn list_android_devices_via_adb() -> Result<Vec<Device>, String> {
   let adb_cmd = get_adb_cmd()?;
 
   let output = std::process::Command::new(&adb_cmd)
@@ -270,11 +303,12 @@ fn list_android_devices_via_adb() -> Result<Vec<AndroidEmulator>, String> {
           .map(|s| s.to_string())
           .unwrap_or_else(|| id.clone());
 
-        Some(AndroidEmulator {
+        Some(Device {
+          platform: Platform::Android,
           name,
           id,
-          device_type: DEVICE_TYPE_RUNNING.to_string(),
           state: STATE_BOOTED.to_string(),
+          meta: DEVICE_TYPE_RUNNING.to_string(),
         })
       })
       .collect(),
@@ -282,7 +316,7 @@ fn list_android_devices_via_adb() -> Result<Vec<AndroidEmulator>, String> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn list_ios_simulators() -> Result<Vec<IosSimulator>, String> {
+pub fn list_ios_simulators() -> Result<Vec<Device>, String> {
   let xcrun = get_xcrun_cmd()?;
 
   let output = std::process::Command::new(&xcrun)
@@ -302,7 +336,7 @@ pub fn list_ios_simulators() -> Result<Vec<IosSimulator>, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn list_ios_simulators() -> Result<Vec<IosSimulator>, String> {
+pub fn list_ios_simulators() -> Result<Vec<Device>, String> {
   Err(ERR_IOS_ONLY_MACOS.to_string())
 }
 
@@ -334,7 +368,7 @@ fn pretty_runtime(identifier: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn parse_ios_simulators(json: &str) -> Result<Vec<IosSimulator>, String> {
+fn parse_ios_simulators(json: &str) -> Result<Vec<Device>, String> {
   #[derive(serde::Deserialize)]
   struct DevicesResponse {
     devices: serde_json::Value,
@@ -360,11 +394,12 @@ fn parse_ios_simulators(json: &str) -> Result<Vec<IosSimulator>, String> {
           };
 
           if matches!(state, STATE_BOOTED | STATE_SHUTDOWN | STATE_AVAILABLE) {
-            simulators.push(IosSimulator {
+            simulators.push(Device {
+              platform: Platform::Ios,
               name: name.to_string(),
-              udid: udid.to_string(),
+              id: udid.to_string(),
               state: state.to_string(),
-              runtime: pretty_runtime(runtime),
+              meta: pretty_runtime(runtime),
             });
           }
         }
@@ -527,20 +562,42 @@ pub fn open_ios_simulator(_udid: &str) -> Result<String, String> {
   Err(ERR_IOS_ONLY_MACOS.to_string())
 }
 
-pub fn find_emulator(name: &str) -> Result<EmulatorType, String> {
-  if let Ok(android) = list_android_emulators() {
-    if let Some(emu) = android.iter().find(|e| e.name == name || e.id == name) {
-      return Ok(EmulatorType::Android(emu.id.clone()));
+/// Find the single device whose display name or id equals `query`.
+///
+/// Fails when nothing matches, or when several do (the same name on both
+/// platforms, or on two iOS runtimes) so we never launch the wrong one.
+pub fn find_device(query: &str) -> Result<Device, String> {
+  let mut matches: Vec<Device> = list_android_emulators()
+    .unwrap_or_default()
+    .into_iter()
+    .chain(list_ios_simulators().unwrap_or_default())
+    .filter(|d| d.name == query || d.id == query)
+    .collect();
+
+  match matches.len() {
+    0 => Err(format!("Emulator '{}' not found", query)),
+    1 => Ok(matches.remove(0)),
+    _ => {
+      let choices: Vec<String> = matches
+        .iter()
+        .map(|d| {
+          format!(
+            "  {} ({}, {}: {})",
+            d.name,
+            d.meta,
+            d.platform.id_label(),
+            d.id
+          )
+        })
+        .collect();
+      Err(format!(
+        "'{}' matches {} devices; open one by its id instead:\n{}",
+        query,
+        matches.len(),
+        choices.join("\n")
+      ))
     }
   }
-
-  if let Ok(ios) = list_ios_simulators() {
-    if let Some(sim) = ios.iter().find(|s| s.name == name || s.udid == name) {
-      return Ok(EmulatorType::Ios(sim.udid.clone()));
-    }
-  }
-
-  Err(format!("Emulator '{}' not found", name))
 }
 
 /// Result of gathering every platform's devices for the TUI.
@@ -559,9 +616,9 @@ pub fn collect_all_entries() -> Collected {
   match list_android_emulators() {
     Ok(android) if !android.is_empty() => {
       entries.push(EmulatorEntry::SectionHeader(
-        SECTION_ANDROID_EMULATORS.to_string(),
+        Platform::Android.section_title().to_string(),
       ));
-      entries.extend(android.into_iter().map(EmulatorEntry::Android));
+      entries.extend(android.into_iter().map(EmulatorEntry::Device));
     }
     Ok(_) => {}
     Err(e) => errors.push(e),
@@ -570,9 +627,9 @@ pub fn collect_all_entries() -> Collected {
   match list_ios_simulators() {
     Ok(ios) if !ios.is_empty() => {
       entries.push(EmulatorEntry::SectionHeader(
-        SECTION_IOS_SIMULATORS.to_string(),
+        Platform::Ios.section_title().to_string(),
       ));
-      entries.extend(ios.into_iter().map(EmulatorEntry::Ios));
+      entries.extend(ios.into_iter().map(EmulatorEntry::Device));
     }
     Ok(_) => {}
     Err(e) if e == ERR_IOS_ONLY_MACOS => {}
@@ -582,48 +639,39 @@ pub fn collect_all_entries() -> Collected {
   Collected { entries, errors }
 }
 
-/// Open an emulator entry (non-header)
-pub fn open_entry(entry: &EmulatorEntry) -> Result<String, String> {
-  match entry {
-    EmulatorEntry::Android(e) => open_android_emulator(&e.id),
-    EmulatorEntry::Ios(s) => open_ios_simulator(&s.udid),
-    EmulatorEntry::SectionHeader(_) => Err("Cannot open a section header".to_string()),
-  }
-}
-
 /// Format a plain text list for the `list` subcommand
 pub fn format_emulator_list() -> String {
   let mut output = String::new();
 
-  match list_android_emulators() {
-    Ok(android) if !android.is_empty() => {
-      output.push_str(SECTION_ANDROID_EMULATORS);
-      output.push_str(":\n");
-      for emu in android {
-        output.push_str(&format!(
-          "  {} [{}] ({})\n",
-          emu.name, emu.state, emu.device_type
-        ));
-      }
+  let sections = [
+    (
+      Platform::Android,
+      list_android_emulators(),
+      "No Android emulators found",
+      "Android emulators",
+    ),
+    (
+      Platform::Ios,
+      list_ios_simulators(),
+      "No iOS simulators found",
+      "iOS simulators",
+    ),
+  ];
+  for (i, (platform, result, none_found, error_prefix)) in sections.into_iter().enumerate() {
+    if i > 0 {
       output.push('\n');
     }
-    Ok(_) => output.push_str("No Android emulators found\n\n"),
-    Err(e) => output.push_str(&format!("Android emulators error: {}\n\n", e)),
-  }
-
-  match list_ios_simulators() {
-    Ok(ios) if !ios.is_empty() => {
-      output.push_str(SECTION_IOS_SIMULATORS);
-      output.push_str(":\n");
-      for sim in ios {
-        output.push_str(&format!(
-          "  {} [{}] ({})\n",
-          sim.name, sim.state, sim.runtime
-        ));
+    match result {
+      Ok(devices) if !devices.is_empty() => {
+        output.push_str(platform.section_title());
+        output.push_str(":\n");
+        for device in devices {
+          output.push_str(&format!("  {}\n", device));
+        }
       }
+      Ok(_) => output.push_str(&format!("{}\n", none_found)),
+      Err(e) => output.push_str(&format!("{} error: {}\n", error_prefix, e)),
     }
-    Ok(_) => output.push_str("No iOS simulators found\n"),
-    Err(e) => output.push_str(&format!("iOS simulators error: {}\n", e)),
   }
 
   output
