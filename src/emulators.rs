@@ -308,6 +308,33 @@ pub fn list_ios_simulators() -> Result<Vec<IOSSimulator>, String> {
   Err(ERR_IOS_ONLY_MACOS.to_string())
 }
 
+/// Turn a simctl runtime identifier such as
+/// `com.apple.CoreSimulator.SimRuntime.iOS-17-0` into `iOS 17.0`. Any
+/// non-numeric trailing part (device-specific runtimes such as
+/// `iOS-27-2-iPhone19-4`) is appended after a dash. Unrecognised identifiers
+/// are returned unchanged.
+#[cfg(target_os = "macos")]
+fn pretty_runtime(identifier: &str) -> String {
+  let Some(rest) = identifier.strip_prefix("com.apple.CoreSimulator.SimRuntime.") else {
+    return identifier.to_string();
+  };
+  let mut parts = rest.split('-');
+  let platform = parts.next().unwrap_or_default();
+  let parts: Vec<&str> = parts.collect();
+  let numeric = parts
+    .iter()
+    .take_while(|p| p.chars().all(|c| c.is_ascii_digit()))
+    .count();
+  let version = parts[..numeric].join(".");
+  let suffix = parts[numeric..].join("-");
+  match (version.is_empty(), suffix.is_empty()) {
+    (true, true) => platform.to_string(),
+    (true, false) => format!("{} - {}", platform, suffix),
+    (false, true) => format!("{} {}", platform, version),
+    (false, false) => format!("{} {} - {}", platform, version, suffix),
+  }
+}
+
 #[cfg(target_os = "macos")]
 fn parse_ios_simulators(json: &str) -> Result<Vec<IOSSimulator>, String> {
   #[derive(serde::Deserialize)]
@@ -339,7 +366,7 @@ fn parse_ios_simulators(json: &str) -> Result<Vec<IOSSimulator>, String> {
               name: name.to_string(),
               udid: udid.to_string(),
               state: state.to_string(),
-              runtime: runtime.clone(),
+              runtime: pretty_runtime(runtime),
             });
           }
         }
