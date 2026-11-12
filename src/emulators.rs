@@ -326,18 +326,21 @@ fn list_android_devices_via_adb() -> Result<Vec<Device>> {
 }
 
 /// Parse the output of `adb devices -l` into running devices.
+///
+/// Each device line is `<serial> <state> key:value...`. Only lines whose state
+/// is `device` are kept, which also drops the header, any `* daemon ...`
+/// notices, and devices that are `offline` or `unauthorized`.
 fn parse_adb_devices_long(output: &str) -> Vec<Device> {
   output
     .lines()
-    .skip(1)
-    .filter(|line| !line.is_empty() && line.contains("device"))
     .filter_map(|line| {
-      let parts: Vec<&str> = line.split_whitespace().collect();
-      let id = parts.first().map(|s| s.to_string())?;
+      let mut parts = line.split_whitespace();
+      let id = parts.next()?.to_string();
+      if parts.next()? != "device" {
+        return None;
+      }
       let name = parts
-        .iter()
-        .find(|p| p.starts_with("model:"))
-        .and_then(|p| p.strip_prefix("model:"))
+        .find_map(|p| p.strip_prefix("model:"))
         .map(|s| s.to_string())
         .unwrap_or_else(|| id.clone());
 
@@ -874,6 +877,23 @@ emulator-5554          device product:sdk_gphone64 model:Pixel_8 device:emu64a t
     assert!(devices[0].state.is_booted());
     // Without a model token the serial is used as the name
     assert_eq!(devices[1].name, "0123456789ABCDEF");
+  }
+
+  #[test]
+  fn adb_long_listing_only_includes_devices_in_the_device_state() {
+    let output = "* daemon not running; starting now at tcp:5037\n\
+* daemon started successfully\n\
+List of devices attached\n\
+emulator-5554          device product:sdk model:Pixel_8 device:emu64a transport_id:1\n\
+emulator-5556          offline transport_id:2\n\
+R58M12ABCDE            unauthorized usb:1-1 transport_id:3\n\
+\n";
+    let devices = parse_adb_devices_long(output);
+
+    assert_eq!(
+      devices.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
+      vec!["emulator-5554"]
+    );
   }
 
   // --- AVD directory scan ----------------------------------------------
