@@ -88,11 +88,22 @@ fn get_xcrun_cmd() -> Result<String, String> {
   config::get_xcrun_cmd().map_err(|e: config::CommandNotFoundError| e.to_string())
 }
 
+/// Directory holding AVD definitions, following the Android tooling rules:
+/// `$ANDROID_AVD_HOME`, else `$ANDROID_USER_HOME/avd`, else `~/.android/avd`.
+fn avd_home() -> Option<std::path::PathBuf> {
+  let env_dir = |var| std::env::var_os(var).filter(|v| !v.is_empty());
+  if let Some(dir) = env_dir("ANDROID_AVD_HOME") {
+    return Some(dir.into());
+  }
+  if let Some(dir) = env_dir("ANDROID_USER_HOME") {
+    return Some(std::path::PathBuf::from(dir).join("avd"));
+  }
+  dirs::home_dir().map(|h| h.join(".android").join("avd"))
+}
+
 /// Read the display name from an AVD's config.ini
 fn get_avd_display_name(avd_id: &str) -> Option<String> {
-  let home = std::env::var("HOME").ok()?;
-  let config_path = std::path::PathBuf::from(&home)
-    .join(".android/avd")
+  let config_path = avd_home()?
     .join(format!("{}.avd", avd_id))
     .join("config.ini");
   let contents = std::fs::read_to_string(config_path).ok()?;
@@ -151,8 +162,7 @@ fn get_running_avd_names() -> Result<Vec<String>, String> {
 
 /// List AVDs by scanning ~/.android/avd/ directory
 fn list_avds_from_directory() -> Result<Vec<AndroidEmulator>, String> {
-  let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-  let avd_dir = std::path::PathBuf::from(&home).join(".android/avd");
+  let avd_dir = avd_home().ok_or_else(|| "Cannot determine AVD directory".to_string())?;
 
   let entries =
     std::fs::read_dir(&avd_dir).map_err(|e| format!("Cannot read AVD directory: {}", e))?;
@@ -177,7 +187,7 @@ fn list_avds_from_directory() -> Result<Vec<AndroidEmulator>, String> {
   }
 
   if emulators.is_empty() {
-    Err("No AVDs found in ~/.android/avd/".to_string())
+    Err(format!("No AVDs found in {}", avd_dir.display()))
   } else {
     Ok(emulators)
   }
