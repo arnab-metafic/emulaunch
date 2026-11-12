@@ -585,6 +585,12 @@ fn run_app(
             app.filter.pop();
             app.apply_filter();
           }
+          KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+          // Ignore other Ctrl/Alt chords so they don't end up in the filter
+          KeyCode::Char(_)
+            if key
+              .modifiers
+              .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {}
           KeyCode::Char(c) => {
             app.filter.push(c);
             app.apply_filter();
