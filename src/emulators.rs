@@ -255,6 +255,8 @@ fn scan_avd_dir(avd_dir: &std::path::Path) -> Result<Vec<Device>> {
   if emulators.is_empty() {
     Err(Error::NoAvds(avd_dir.to_path_buf()))
   } else {
+    // read_dir order is arbitrary; keep the list stable between runs
+    emulators.sort_by_cached_key(|d| (d.name.to_lowercase(), d.id.clone()));
     Ok(emulators)
   }
 }
@@ -906,11 +908,10 @@ R58M12ABCDE            unauthorized usb:1-1 transport_id:3\n\
     tmp.file("Plain.ini", "path=x\n");
     tmp.dir("Plain.avd");
 
-    let mut found = scan_avd_dir(tmp.path()).unwrap();
-    found.sort_by(|a, b| a.id.cmp(&b.id));
+    let found = scan_avd_dir(tmp.path()).unwrap();
 
     assert_eq!(found.len(), 2);
-    // Sorted by id: "Pixel_8" < "Plain"
+    // Sorted by display name, case-insensitively
     assert_eq!(
       (found[0].id.as_str(), found[0].name.as_str()),
       ("Pixel_8", "Pixel 8")
@@ -922,6 +923,26 @@ R58M12ABCDE            unauthorized usb:1-1 transport_id:3\n\
     assert!(found.iter().all(|d| d.platform == Platform::Android));
     assert!(found.iter().all(|d| d.state == State::Shutdown));
     assert!(found.iter().all(|d| d.meta == DEVICE_TYPE_AVD));
+  }
+
+  #[test]
+  fn scan_returns_avds_sorted_by_display_name() {
+    let tmp = TempDir::new();
+    for (id, name) in [("c_id", "charlie"), ("a_id", "Bravo"), ("b_id", "alpha")] {
+      tmp.file(&format!("{id}.ini"), "path=x\n");
+      tmp.file(
+        &format!("{id}.avd/config.ini"),
+        &format!("avd.ini.displayname={name}\n"),
+      );
+    }
+
+    let names: Vec<String> = scan_avd_dir(tmp.path())
+      .unwrap()
+      .into_iter()
+      .map(|d| d.name)
+      .collect();
+
+    assert_eq!(names, vec!["alpha", "Bravo", "charlie"]);
   }
 
   #[test]
