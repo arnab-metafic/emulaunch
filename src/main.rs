@@ -461,15 +461,15 @@ fn run_app(
 
       // Help bar
       let help = Paragraph::new(Line::from(vec![
-        Span::styled(" j/k", Style::default().fg(theme.help_key_fg)),
+        Span::styled(" ↑/↓", Style::default().fg(theme.help_key_fg)),
         Span::styled(" navigate  ", Style::default().fg(theme.help_text_fg)),
         Span::styled("Enter", Style::default().fg(theme.help_key_fg)),
         Span::styled(" open  ", Style::default().fg(theme.help_text_fg)),
-        Span::styled("r", Style::default().fg(theme.help_key_fg)),
+        Span::styled("^R", Style::default().fg(theme.help_key_fg)),
         Span::styled(" refresh  ", Style::default().fg(theme.help_text_fg)),
         Span::styled("?", Style::default().fg(theme.help_key_fg)),
         Span::styled(" help  ", Style::default().fg(theme.help_text_fg)),
-        Span::styled("q/Esc", Style::default().fg(theme.help_key_fg)),
+        Span::styled("Esc", Style::default().fg(theme.help_key_fg)),
         Span::styled(" quit", Style::default().fg(theme.help_text_fg)),
       ]));
       frame.render_widget(help, chunks[2]);
@@ -489,7 +489,7 @@ fn run_app(
         let help_lines = vec![
           Line::from(""),
           Line::from(vec![
-            Span::styled("  ↑/↓ j/k   ", key_style),
+            Span::styled("  ↑/↓ ^N/^P  ", key_style),
             Span::styled("Navigate list", text_style),
           ]),
           Line::from(vec![
@@ -497,11 +497,11 @@ fn run_app(
             Span::styled("Launch selected emulator", text_style),
           ]),
           Line::from(vec![
-            Span::styled("  r          ", key_style),
+            Span::styled("  ^R / F5    ", key_style),
             Span::styled("Refresh emulator list", text_style),
           ]),
           Line::from(vec![
-            Span::styled("  Ctrl+U     ", key_style),
+            Span::styled("  ^U         ", key_style),
             Span::styled("Clear filter", text_style),
           ]),
           Line::from(vec![
@@ -513,11 +513,11 @@ fn run_app(
             Span::styled("Delete filter character", text_style),
           ]),
           Line::from(vec![
-            Span::styled("  ?          ", key_style),
+            Span::styled("  ? / F1     ", key_style),
             Span::styled("Toggle this help", text_style),
           ]),
           Line::from(vec![
-            Span::styled("  q / Esc    ", key_style),
+            Span::styled("  Esc / ^C   ", key_style),
             Span::styled("Quit", text_style),
           ]),
           Line::from(""),
@@ -546,7 +546,7 @@ fn run_app(
         // When the help overlay is open, only handle overlay-dismissal keys
         if app.show_help {
           match key.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+            KeyCode::Esc | KeyCode::Char('q' | '?') | KeyCode::F(1) => {
               app.show_help = false;
             }
             _ => {}
@@ -554,17 +554,20 @@ fn run_app(
           continue;
         }
 
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
           KeyCode::Esc => break,
-          KeyCode::Char('q') if app.filter.is_empty() => break,
+          KeyCode::Char('c') if ctrl => break,
           KeyCode::Char('?') if app.filter.is_empty() => app.show_help = true,
-          KeyCode::Char('r') if app.filter.is_empty() => app.reload(),
-          KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+          KeyCode::F(1) => app.show_help = true,
+          KeyCode::Char('r') if ctrl => app.reload(),
+          KeyCode::F(5) => app.reload(),
+          KeyCode::Char('u') if ctrl => {
             app.filter.clear();
             app.apply_filter();
           }
-          KeyCode::Char('j') if app.filter.is_empty() => app.move_selection(1),
-          KeyCode::Char('k') if app.filter.is_empty() => app.move_selection(-1),
+          KeyCode::Char('n') if ctrl => app.move_selection(1),
+          KeyCode::Char('p') if ctrl => app.move_selection(-1),
           KeyCode::Down => app.move_selection(1),
           KeyCode::Up => app.move_selection(-1),
           KeyCode::Enter => {
@@ -585,7 +588,6 @@ fn run_app(
             app.filter.pop();
             app.apply_filter();
           }
-          KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
           // Ignore other Ctrl/Alt chords so they don't end up in the filter
           KeyCode::Char(_)
             if key
