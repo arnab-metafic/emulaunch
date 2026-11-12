@@ -1,5 +1,6 @@
 mod config;
 mod emulators;
+mod error;
 mod theme;
 
 use clap::{Parser, Subcommand};
@@ -295,7 +296,8 @@ fn run_tui() -> io::Result<()> {
       return Ok(());
     }
     // Explain why nothing could be listed (e.g. adb / emulator not found)
-    return Err(io::Error::other(errors.join("\n\n")));
+    let reasons: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+    return Err(io::Error::other(reasons.join("\n\n")));
   }
 
   let cfg = config::load_config();

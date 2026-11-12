@@ -1,4 +1,5 @@
 use crate::config;
+use crate::error::{Error, Result};
 
 use std::fmt;
 use std::process::Stdio;
@@ -6,9 +7,6 @@ use std::process::Stdio;
 // Device types
 pub const DEVICE_TYPE_AVD: &str = "AVD";
 pub const DEVICE_TYPE_RUNNING: &str = "Running Device";
-
-// Error messages
-pub const ERR_IOS_ONLY_MACOS: &str = "iOS simulators are only available on macOS";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -100,7 +98,7 @@ pub struct Device {
 
 impl Device {
   /// Launch this device.
-  pub fn open(&self) -> Result<String, String> {
+  pub fn open(&self) -> Result<String> {
     match self.platform {
       Platform::Android => open_android_emulator(&self.id),
       Platform::Ios => open_ios_simulator(&self.id),
@@ -114,17 +112,17 @@ impl fmt::Display for Device {
   }
 }
 
-fn get_android_emulator_cmd() -> Result<String, String> {
-  config::get_android_emulator_cmd().map_err(|e: config::CommandNotFoundError| e.to_string())
+fn get_android_emulator_cmd() -> Result<String> {
+  Ok(config::get_android_emulator_cmd()?)
 }
 
-fn get_adb_cmd() -> Result<String, String> {
-  config::get_adb_cmd().map_err(|e: config::CommandNotFoundError| e.to_string())
+fn get_adb_cmd() -> Result<String> {
+  Ok(config::get_adb_cmd()?)
 }
 
 #[cfg(target_os = "macos")]
-fn get_xcrun_cmd() -> Result<String, String> {
-  config::get_xcrun_cmd().map_err(|e: config::CommandNotFoundError| e.to_string())
+fn get_xcrun_cmd() -> Result<String> {
+  Ok(config::get_xcrun_cmd()?)
 }
 
 /// Directory holding AVD definitions, following the Android tooling rules:
@@ -154,13 +152,13 @@ fn get_avd_display_name(avd_id: &str) -> Option<String> {
 }
 
 /// Get the set of AVD names that are currently running via adb
-fn get_running_avd_names() -> Result<Vec<String>, String> {
+fn get_running_avd_names() -> Result<Vec<String>> {
   let adb_cmd = get_adb_cmd()?;
 
   let output = std::process::Command::new(&adb_cmd)
     .args(["devices"])
     .output()
-    .map_err(|e| format!("Failed to run adb devices: {}", e))?;
+    .map_err(Error::io("Failed to run adb devices"))?;
 
   if !output.status.success() {
     return Ok(Vec::new());
@@ -200,11 +198,10 @@ fn get_running_avd_names() -> Result<Vec<String>, String> {
 }
 
 /// List AVDs by scanning ~/.android/avd/ directory
-fn list_avds_from_directory() -> Result<Vec<Device>, String> {
-  let avd_dir = avd_home().ok_or_else(|| "Cannot determine AVD directory".to_string())?;
+fn list_avds_from_directory() -> Result<Vec<Device>> {
+  let avd_dir = avd_home().ok_or(Error::NoAvdDirectory)?;
 
-  let entries =
-    std::fs::read_dir(&avd_dir).map_err(|e| format!("Cannot read AVD directory: {}", e))?;
+  let entries = std::fs::read_dir(&avd_dir).map_err(Error::io("Cannot read AVD directory"))?;
 
   let mut emulators = Vec::new();
   for entry in entries.flatten() {
@@ -227,13 +224,13 @@ fn list_avds_from_directory() -> Result<Vec<Device>, String> {
   }
 
   if emulators.is_empty() {
-    Err(format!("No AVDs found in {}", avd_dir.display()))
+    Err(Error::NoAvds(avd_dir))
   } else {
     Ok(emulators)
   }
 }
 
-pub fn list_android_emulators() -> Result<Vec<Device>, String> {
+pub fn list_android_emulators() -> Result<Vec<Device>> {
   let emulator_cmd = get_android_emulator_cmd()?;
   let running_names = get_running_avd_names().unwrap_or_default();
 
@@ -279,19 +276,19 @@ pub fn list_android_emulators() -> Result<Vec<Device>, String> {
   Ok(emulators)
 }
 
-fn list_android_devices_via_adb() -> Result<Vec<Device>, String> {
+fn list_android_devices_via_adb() -> Result<Vec<Device>> {
   let adb_cmd = get_adb_cmd()?;
 
   let output = std::process::Command::new(&adb_cmd)
     .args(["devices", "-l"])
     .output()
-    .map_err(|e| format!("Failed to run adb command: {}", e))?;
+    .map_err(Error::io("Failed to run adb command"))?;
 
   if !output.status.success() {
-    return Err(format!(
-      "adb devices failed: {}",
-      String::from_utf8_lossy(&output.stderr)
-    ));
+    return Err(Error::CommandFailed {
+      tool: "adb devices",
+      stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    });
   }
 
   let stdout = String::from_utf8_lossy(&output.stdout);
@@ -323,19 +320,19 @@ fn list_android_devices_via_adb() -> Result<Vec<Device>, String> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn list_ios_simulators() -> Result<Vec<Device>, String> {
+pub fn list_ios_simulators() -> Result<Vec<Device>> {
   let xcrun = get_xcrun_cmd()?;
 
   let output = std::process::Command::new(&xcrun)
     .args(["simctl", "list", "devices", "available", "--json"])
     .output()
-    .map_err(|e| format!("Failed to run xcrun simctl: {}", e))?;
+    .map_err(Error::io("Failed to run xcrun simctl"))?;
 
   if !output.status.success() {
-    return Err(format!(
-      "xcrun simctl failed: {}",
-      String::from_utf8_lossy(&output.stderr)
-    ));
+    return Err(Error::CommandFailed {
+      tool: "xcrun simctl",
+      stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    });
   }
 
   let json = String::from_utf8_lossy(&output.stdout);
@@ -343,8 +340,8 @@ pub fn list_ios_simulators() -> Result<Vec<Device>, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn list_ios_simulators() -> Result<Vec<Device>, String> {
-  Err(ERR_IOS_ONLY_MACOS.to_string())
+pub fn list_ios_simulators() -> Result<Vec<Device>> {
+  Err(Error::IosUnsupported)
 }
 
 /// Turn a simctl runtime identifier such as
@@ -375,14 +372,13 @@ fn pretty_runtime(identifier: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn parse_ios_simulators(json: &str) -> Result<Vec<Device>, String> {
+fn parse_ios_simulators(json: &str) -> Result<Vec<Device>> {
   #[derive(serde::Deserialize)]
   struct DevicesResponse {
     devices: serde_json::Value,
   }
 
-  let response: DevicesResponse =
-    serde_json::from_str(json).map_err(|e| format!("Failed to parse simctl JSON: {}", e))?;
+  let response: DevicesResponse = serde_json::from_str(json)?;
 
   let mut simulators = Vec::new();
 
@@ -442,7 +438,7 @@ fn log_tail(path: &std::path::Path) -> String {
   lines[lines.len().saturating_sub(8)..].join("\n")
 }
 
-pub fn open_android_emulator(avd: &str) -> Result<String, String> {
+pub fn open_android_emulator(avd: &str) -> Result<String> {
   let emulator_cmd = get_android_emulator_cmd()?;
 
   // A second `emulator -avd` for the same AVD refuses to start
@@ -451,17 +447,20 @@ pub fn open_android_emulator(avd: &str) -> Result<String, String> {
     .iter()
     .any(|n| n == avd)
   {
-    return Err(format!("Android emulator '{}' is already running", avd));
+    return Err(Error::AlreadyRunning(avd.to_string()));
   }
 
   // Send output to a log file rather than a pipe: a pipe would break (SIGPIPE)
   // once we exit while the emulator keeps running.
   let log_path = std::env::temp_dir().join(format!("emulaunch-{}.log", avd));
-  let log = std::fs::File::create(&log_path)
-    .map_err(|e| format!("Cannot create log file {}: {}", log_path.display(), e))?;
-  let log_err = log
-    .try_clone()
-    .map_err(|e| format!("Cannot open log file {}: {}", log_path.display(), e))?;
+  let log = std::fs::File::create(&log_path).map_err(Error::io(format!(
+    "Cannot create log file {}",
+    log_path.display()
+  )))?;
+  let log_err = log.try_clone().map_err(Error::io(format!(
+    "Cannot open log file {}",
+    log_path.display()
+  )))?;
 
   let mut cmd = std::process::Command::new(&emulator_cmd);
   cmd
@@ -473,7 +472,7 @@ pub fn open_android_emulator(avd: &str) -> Result<String, String> {
 
   let mut child = cmd
     .spawn()
-    .map_err(|e| format!("Failed to launch emulator '{}': {}", avd, e))?;
+    .map_err(Error::io(format!("Failed to launch emulator '{}'", avd)))?;
 
   // Real startup takes much longer than this, but configuration errors (bad
   // AVD, missing system image, ...) make the emulator exit almost immediately.
@@ -481,13 +480,12 @@ pub fn open_android_emulator(avd: &str) -> Result<String, String> {
   while std::time::Instant::now() < deadline {
     match child.try_wait() {
       Ok(Some(status)) => {
-        return Err(format!(
-          "Emulator '{}' exited immediately ({}):\n{}\n(full log: {})",
-          avd,
+        return Err(Error::ExitedEarly {
+          avd: avd.to_string(),
           status,
-          log_tail(&log_path),
-          log_path.display()
-        ));
+          log_tail: log_tail(&log_path),
+          log_path,
+        });
       }
       Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
       Err(_) => break,
@@ -530,7 +528,7 @@ fn open_simulator_ui(udid: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-pub fn open_ios_simulator(udid: &str) -> Result<String, String> {
+pub fn open_ios_simulator(udid: &str) -> Result<String> {
   let xcrun = get_xcrun_cmd()?;
 
   let boot_output = std::process::Command::new(&xcrun)
@@ -546,10 +544,15 @@ pub fn open_ios_simulator(udid: &str) -> Result<String, String> {
       if !result.status.success()
         && !stderr.contains("Unable to boot device in current state: Booted")
       {
-        return Err(format!("Failed to boot simulator: {}", stderr));
+        return Err(Error::BootFailed(stderr.into_owned()));
       }
     }
-    Err(e) => return Err(format!("Failed to run simctl boot: {}", e)),
+    Err(e) => {
+      return Err(Error::Io {
+        context: "Failed to run simctl boot".to_string(),
+        source: e,
+      })
+    }
   }
 
   if open_simulator_ui(udid) {
@@ -563,15 +566,15 @@ pub fn open_ios_simulator(udid: &str) -> Result<String, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn open_ios_simulator(_udid: &str) -> Result<String, String> {
-  Err(ERR_IOS_ONLY_MACOS.to_string())
+pub fn open_ios_simulator(_udid: &str) -> Result<String> {
+  Err(Error::IosUnsupported)
 }
 
 /// Find the single device whose display name or id equals `query`.
 ///
 /// Fails when nothing matches, or when several do (the same name on both
 /// platforms, or on two iOS runtimes) so we never launch the wrong one.
-pub fn find_device(query: &str) -> Result<Device, String> {
+pub fn find_device(query: &str) -> Result<Device> {
   let mut matches: Vec<Device> = list_android_emulators()
     .unwrap_or_default()
     .into_iter()
@@ -580,7 +583,7 @@ pub fn find_device(query: &str) -> Result<Device, String> {
     .collect();
 
   match matches.len() {
-    0 => Err(format!("Emulator '{}' not found", query)),
+    0 => Err(Error::NotFound(query.to_string())),
     1 => Ok(matches.remove(0)),
     _ => {
       let choices: Vec<String> = matches
@@ -595,12 +598,11 @@ pub fn find_device(query: &str) -> Result<Device, String> {
           )
         })
         .collect();
-      Err(format!(
-        "'{}' matches {} devices; open one by its id instead:\n{}",
-        query,
-        matches.len(),
-        choices.join("\n")
-      ))
+      Err(Error::Ambiguous {
+        query: query.to_string(),
+        count: matches.len(),
+        choices: choices.join("\n"),
+      })
     }
   }
 }
@@ -611,7 +613,7 @@ pub struct Collected {
   pub devices: Vec<Device>,
   /// Why a platform could not be listed (e.g. a missing `adb`). Platforms that
   /// are simply unsupported on this OS are not reported.
-  pub errors: Vec<String>,
+  pub errors: Vec<Error>,
 }
 
 /// List the devices of every platform.
@@ -626,7 +628,7 @@ pub fn collect_devices() -> Collected {
 
   match list_ios_simulators() {
     Ok(ios) => devices.extend(ios),
-    Err(e) if e == ERR_IOS_ONLY_MACOS => {}
+    Err(Error::IosUnsupported) => {}
     Err(e) => errors.push(e),
   }
 

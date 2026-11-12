@@ -25,6 +25,7 @@ serde_json = "1.0"
 dirs = "6.0"
 toml = "0.8"
 which = "8.0.6"
+thiserror = "2.0.21"
 
 # The profile that 'dist' will build with
 [profile.dist]
