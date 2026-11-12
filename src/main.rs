@@ -19,7 +19,7 @@ use ratatui::{
 use std::io;
 
 #[derive(Parser)]
-#[command(name = "emulators", about = "List and open Android/iOS emulators")]
+#[command(version, about = "List and open Android/iOS emulators")]
 struct Cli {
   #[command(subcommand)]
   command: Option<Commands>,
