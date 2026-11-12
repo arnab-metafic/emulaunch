@@ -18,7 +18,6 @@ pub const DEVICE_TYPE_AVD: &str = "AVD";
 pub const DEVICE_TYPE_RUNNING: &str = "Running Device";
 
 // Error messages
-#[allow(dead_code)]
 pub const ERR_IOS_ONLY_MACOS: &str = "iOS simulators are only available on macOS";
 
 #[derive(Debug, Clone)]
@@ -309,6 +308,33 @@ pub fn list_ios_simulators() -> Result<Vec<IOSSimulator>, String> {
   Err(ERR_IOS_ONLY_MACOS.to_string())
 }
 
+/// Turn a simctl runtime identifier such as
+/// `com.apple.CoreSimulator.SimRuntime.iOS-17-0` into `iOS 17.0`. Any
+/// non-numeric trailing part (device-specific runtimes such as
+/// `iOS-27-2-iPhone19-4`) is appended after a dash. Unrecognised identifiers
+/// are returned unchanged.
+#[cfg(target_os = "macos")]
+fn pretty_runtime(identifier: &str) -> String {
+  let Some(rest) = identifier.strip_prefix("com.apple.CoreSimulator.SimRuntime.") else {
+    return identifier.to_string();
+  };
+  let mut parts = rest.split('-');
+  let platform = parts.next().unwrap_or_default();
+  let parts: Vec<&str> = parts.collect();
+  let numeric = parts
+    .iter()
+    .take_while(|p| p.chars().all(|c| c.is_ascii_digit()))
+    .count();
+  let version = parts[..numeric].join(".");
+  let suffix = parts[numeric..].join("-");
+  match (version.is_empty(), suffix.is_empty()) {
+    (true, true) => platform.to_string(),
+    (true, false) => format!("{} - {}", platform, suffix),
+    (false, true) => format!("{} {}", platform, version),
+    (false, false) => format!("{} {} - {}", platform, version, suffix),
+  }
+}
+
 #[cfg(target_os = "macos")]
 fn parse_ios_simulators(json: &str) -> Result<Vec<IOSSimulator>, String> {
   #[derive(serde::Deserialize)]
@@ -340,7 +366,7 @@ fn parse_ios_simulators(json: &str) -> Result<Vec<IOSSimulator>, String> {
               name: name.to_string(),
               udid: udid.to_string(),
               state: state.to_string(),
-              runtime: runtime.clone(),
+              runtime: pretty_runtime(runtime),
             });
           }
         }
@@ -351,18 +377,118 @@ fn parse_ios_simulators(json: &str) -> Result<Vec<IOSSimulator>, String> {
   Ok(simulators)
 }
 
-pub fn open_android_emulator(name: &str) -> Result<String, String> {
+/// Detach the child from our terminal's process group (and, on Windows, from
+/// our console) so closing the terminal or pressing Ctrl+C does not kill it.
+fn detach(cmd: &mut std::process::Command) {
+  #[cfg(unix)]
+  {
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
+  }
+  #[cfg(windows)]
+  {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+  }
+}
+
+/// How long to watch a freshly spawned emulator for an immediate failure.
+const LAUNCH_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Last few lines of the emulator log, for error messages.
+fn log_tail(path: &std::path::Path) -> String {
+  let contents = std::fs::read_to_string(path).unwrap_or_default();
+  let lines: Vec<&str> = contents.lines().collect();
+  lines[lines.len().saturating_sub(8)..].join("\n")
+}
+
+pub fn open_android_emulator(avd: &str) -> Result<String, String> {
   let emulator_cmd = get_android_emulator_cmd()?;
 
-  std::process::Command::new(&emulator_cmd)
-    .args(["-avd", name])
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .spawn()
-    .map_err(|e| format!("Failed to launch emulator '{}': {}", name, e))?;
+  // A second `emulator -avd` for the same AVD refuses to start
+  if get_running_avd_names()
+    .unwrap_or_default()
+    .iter()
+    .any(|n| n == avd)
+  {
+    return Err(format!("Android emulator '{}' is already running", avd));
+  }
 
-  Ok(format!("Launching Android emulator: {}", name))
+  // Send output to a log file rather than a pipe: a pipe would break (SIGPIPE)
+  // once we exit while the emulator keeps running.
+  let log_path = std::env::temp_dir().join(format!("emulaunch-{}.log", avd));
+  let log = std::fs::File::create(&log_path)
+    .map_err(|e| format!("Cannot create log file {}: {}", log_path.display(), e))?;
+  let log_err = log
+    .try_clone()
+    .map_err(|e| format!("Cannot open log file {}: {}", log_path.display(), e))?;
+
+  let mut cmd = std::process::Command::new(&emulator_cmd);
+  cmd
+    .args(["-avd", avd])
+    .stdin(Stdio::null())
+    .stdout(log)
+    .stderr(log_err);
+  detach(&mut cmd);
+
+  let mut child = cmd
+    .spawn()
+    .map_err(|e| format!("Failed to launch emulator '{}': {}", avd, e))?;
+
+  // Real startup takes much longer than this, but configuration errors (bad
+  // AVD, missing system image, ...) make the emulator exit almost immediately.
+  let deadline = std::time::Instant::now() + LAUNCH_GRACE;
+  while std::time::Instant::now() < deadline {
+    match child.try_wait() {
+      Ok(Some(status)) => {
+        return Err(format!(
+          "Emulator '{}' exited immediately ({}):\n{}\n(full log: {})",
+          avd,
+          status,
+          log_tail(&log_path),
+          log_path.display()
+        ));
+      }
+      Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+      Err(_) => break,
+    }
+  }
+
+  Ok(format!(
+    "Launching Android emulator: {} (log: {})",
+    avd,
+    log_path.display()
+  ))
+}
+
+/// Bring up the app that displays booted simulators and report whether one
+/// could be opened.
+///
+/// Xcode 27 replaced Simulator.app with Device Hub, so try Simulator.app
+/// first (older Xcode; it honours -CurrentDeviceUDID when it is not already
+/// running) and fall back to Device Hub, which we cannot point at a device.
+/// Apps are addressed by bundle identifier because the app name differs.
+#[cfg(target_os = "macos")]
+fn open_simulator_ui(udid: &str) -> bool {
+  let open = |args: &[&str]| {
+    std::process::Command::new("open")
+      .args(args)
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .status()
+      .map(|s| s.success())
+      .unwrap_or(false)
+  };
+  open(&[
+    "-b",
+    "com.apple.iphonesimulator",
+    "--args",
+    "-CurrentDeviceUDID",
+    udid,
+  ]) || open(&["-b", "com.apple.dt.Devices"])
 }
 
 #[cfg(target_os = "macos")]
@@ -388,14 +514,14 @@ pub fn open_ios_simulator(udid: &str) -> Result<String, String> {
     Err(e) => return Err(format!("Failed to run simctl boot: {}", e)),
   }
 
-  let _ = std::process::Command::new("open")
-    .args(["-a", "Simulator"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .spawn();
-
-  Ok(format!("Opening iOS simulator: {}", udid))
+  if open_simulator_ui(udid) {
+    Ok(format!("Opening iOS simulator: {}", udid))
+  } else {
+    Ok(format!(
+      "Booted iOS simulator: {} (could not open Simulator or Device Hub)",
+      udid
+    ))
+  }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -419,31 +545,43 @@ pub fn find_emulator(name: &str) -> Result<EmulatorType, String> {
   Err(format!("Emulator '{}' not found", name))
 }
 
+/// Result of gathering every platform's devices for the TUI.
+pub struct Collected {
+  pub entries: Vec<EmulatorEntry>,
+  /// Why a platform could not be listed (e.g. a missing `adb`). Platforms that
+  /// are simply unsupported on this OS are not reported.
+  pub errors: Vec<String>,
+}
+
 /// Collect all emulators into a unified list with section headers
-pub fn collect_all_entries() -> Vec<EmulatorEntry> {
+pub fn collect_all_entries() -> Collected {
   let mut entries = Vec::new();
+  let mut errors = Vec::new();
 
-  let android = list_android_emulators().unwrap_or_default();
-  if !android.is_empty() {
-    entries.push(EmulatorEntry::SectionHeader(
-      SECTION_ANDROID_EMULATORS.to_string(),
-    ));
-    for emu in android {
-      entries.push(EmulatorEntry::Android(emu));
+  match list_android_emulators() {
+    Ok(android) if !android.is_empty() => {
+      entries.push(EmulatorEntry::SectionHeader(
+        SECTION_ANDROID_EMULATORS.to_string(),
+      ));
+      entries.extend(android.into_iter().map(EmulatorEntry::Android));
     }
+    Ok(_) => {}
+    Err(e) => errors.push(e),
   }
 
-  let ios = list_ios_simulators().unwrap_or_default();
-  if !ios.is_empty() {
-    entries.push(EmulatorEntry::SectionHeader(
-      SECTION_IOS_SIMULATORS.to_string(),
-    ));
-    for sim in ios {
-      entries.push(EmulatorEntry::IOS(sim));
+  match list_ios_simulators() {
+    Ok(ios) if !ios.is_empty() => {
+      entries.push(EmulatorEntry::SectionHeader(
+        SECTION_IOS_SIMULATORS.to_string(),
+      ));
+      entries.extend(ios.into_iter().map(EmulatorEntry::IOS));
     }
+    Ok(_) => {}
+    Err(e) if e == ERR_IOS_ONLY_MACOS => {}
+    Err(e) => errors.push(e),
   }
 
-  entries
+  Collected { entries, errors }
 }
 
 /// Open an emulator entry (non-header)
