@@ -3,7 +3,7 @@ mod emulators;
 mod theme;
 
 use clap::{Parser, Subcommand};
-use emulators::{Device, EmulatorEntry, State};
+use emulators::{Device, Platform, State};
 use ratatui::{
   crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
   layout::{Constraint, Layout, Rect},
@@ -59,8 +59,13 @@ fn main() {
 }
 
 struct App {
-  entries: Vec<EmulatorEntry>,
-  filtered_indices: Vec<usize>,
+  devices: Vec<Device>,
+  /// Indices into `devices` that match the filter, in display order.
+  filtered: Vec<usize>,
+  /// Position of the selected device within `filtered`.
+  selected: usize,
+  /// Row highlighted in the rendered list. Recomputed every frame because
+  /// section headers are rows too.
   list_state: ListState,
   filter: String,
   result_message: Option<String>,
@@ -68,114 +73,57 @@ struct App {
 }
 
 impl App {
-  fn new(entries: Vec<EmulatorEntry>) -> Self {
-    let filtered_indices: Vec<usize> = (0..entries.len()).collect();
-    let mut list_state = ListState::default();
-    // Select first non-header item
-    let first_selectable = filtered_indices
-      .iter()
-      .position(|&i| !entries[i].is_header());
-    list_state.select(first_selectable);
-
-    App {
-      entries,
-      filtered_indices,
-      list_state,
+  fn new(devices: Vec<Device>) -> Self {
+    let mut app = App {
+      devices,
+      filtered: Vec::new(),
+      selected: 0,
+      list_state: ListState::default(),
       filter: String::new(),
       result_message: None,
       show_help: false,
-    }
+    };
+    app.apply_filter();
+    app
   }
 
+  /// Recompute `filtered` from the filter text and select the first match.
   fn apply_filter(&mut self) {
     let query = self.filter.to_lowercase();
-    self.filtered_indices = (0..self.entries.len())
-      .filter(|&i| {
-        let entry = &self.entries[i];
-        if entry.is_header() {
-          // Keep headers if any child in their section matches
-          return self.section_has_match(i, &query);
-        }
-        query.is_empty() || entry.display_name().to_lowercase().contains(&query)
-      })
-      .collect();
-
-    // Select first non-header item
-    let first_selectable = self
-      .filtered_indices
-      .iter()
-      .position(|&i| !self.entries[i].is_header());
-    self.list_state.select(first_selectable);
-  }
-
-  fn section_has_match(&self, header_idx: usize, query: &str) -> bool {
-    if query.is_empty() {
-      return true;
-    }
-    for i in (header_idx + 1)..self.entries.len() {
-      if self.entries[i].is_header() {
-        break;
-      }
-      if self.entries[i]
-        .display_name()
-        .to_lowercase()
-        .contains(query)
-      {
-        return true;
-      }
-    }
-    false
-  }
-
-  fn move_selection(&mut self, delta: i32) {
-    let selectable: Vec<usize> = self
-      .filtered_indices
+    self.filtered = self
+      .devices
       .iter()
       .enumerate()
-      .filter(|(_, &i)| !self.entries[i].is_header())
-      .map(|(pos, _)| pos)
+      .filter(|(_, d)| query.is_empty() || d.name.to_lowercase().contains(&query))
+      .map(|(i, _)| i)
       .collect();
+    self.selected = 0;
+  }
 
-    if selectable.is_empty() {
-      self.list_state.select(None);
-      return;
+  fn move_selection(&mut self, delta: isize) {
+    if let Some(last) = self.filtered.len().checked_sub(1) {
+      self.selected = self.selected.saturating_add_signed(delta).min(last);
     }
-
-    let current = self.list_state.selected().unwrap_or(0);
-    let current_pos = selectable.iter().position(|&p| p == current).unwrap_or(0);
-    let new_pos = if delta > 0 {
-      (current_pos + 1).min(selectable.len() - 1)
-    } else {
-      current_pos.saturating_sub(1)
-    };
-    self.list_state.select(Some(selectable[new_pos]));
   }
 
   fn selected_device(&self) -> Option<&Device> {
-    let selected = self.list_state.selected()?;
-    let &entry_idx = self.filtered_indices.get(selected)?;
-    match &self.entries[entry_idx] {
-      EmulatorEntry::Device(device) => Some(device),
-      EmulatorEntry::SectionHeader(_) => None,
-    }
+    let &index = self.filtered.get(self.selected)?;
+    self.devices.get(index)
   }
 
-  /// Reload the emulator list in-place, preserving selection by name if possible.
+  /// Reload the device list in-place, keeping the same device selected if it
+  /// is still listed.
   fn reload(&mut self) {
-    let selected_name = self.selected_device().map(|d| d.name.clone());
-    self.entries = emulators::collect_all_entries().entries;
+    let previous = self.selected_device().map(|d| (d.platform, d.id.clone()));
+    self.devices = emulators::collect_devices().devices;
     self.apply_filter();
 
-    // Try to restore selection by matching the previously selected display name
-    if let Some(name) = selected_name {
-      if let Some(pos) = self
-        .filtered_indices
-        .iter()
-        .enumerate()
-        .find(|(_, &i)| self.entries[i].display_name() == name)
-        .map(|(pos, _)| pos)
-      {
-        self.list_state.select(Some(pos));
+    if let Some((platform, id)) = previous {
+      if let Some(pos) = self.filtered.iter().position(|&i| {
+        let d = &self.devices[i];
+        d.platform == platform && d.id == id
+      }) {
+        self.selected = pos;
       }
     }
   }
@@ -196,6 +144,28 @@ fn state_span(state: &State, theme: &theme::ThemeColors) -> Span<'static> {
     format!("{}{}", dot, state),
     Style::default().fg(state_color(state, theme)),
   )
+}
+
+fn header_row(platform: Platform, theme: &theme::ThemeColors) -> ListItem<'static> {
+  ListItem::new(Line::from(Span::styled(
+    format!(" {}", platform.section_title()),
+    Style::default()
+      .fg(theme.header_fg)
+      .add_modifier(Modifier::BOLD),
+  )))
+}
+
+fn device_row<'a>(device: &'a Device, theme: &theme::ThemeColors) -> ListItem<'a> {
+  ListItem::new(Line::from(vec![
+    Span::raw("   "),
+    Span::styled(&device.name, Style::default().fg(theme.name_fg)),
+    Span::raw("  "),
+    state_span(&device.state, theme),
+    Span::styled(
+      format!("  ({})", device.meta),
+      Style::default().fg(theme.meta_fg),
+    ),
+  ]))
 }
 
 /// The detail panel contents for one device.
@@ -251,8 +221,8 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn run_tui() -> io::Result<()> {
-  let emulators::Collected { entries, errors } = emulators::collect_all_entries();
-  if entries.is_empty() {
+  let emulators::Collected { devices, errors } = emulators::collect_devices();
+  if devices.is_empty() {
     if errors.is_empty() {
       println!("No emulators or simulators found.");
       return Ok(());
@@ -270,7 +240,7 @@ fn run_tui() -> io::Result<()> {
   // init() enters raw mode + the alternate screen and installs a panic hook
   // that restores the terminal; restore() always runs, even if run_app fails.
   let mut terminal = ratatui::init();
-  let mut app = App::new(entries);
+  let mut app = App::new(devices);
   let result = run_app(&mut terminal, &mut app, &theme);
   ratatui::restore();
 
@@ -324,44 +294,29 @@ fn run_app(
       frame.render_widget(filter, chunks[0]);
 
       // List title with visible/total count
-      let visible_count = app
-        .filtered_indices
-        .iter()
-        .filter(|&&i| !app.entries[i].is_header())
-        .count();
-      let total_count = app.entries.iter().filter(|e| !e.is_header()).count();
       let list_title = if app.filter.is_empty() {
-        format!(" Emulators ({}) ", total_count)
+        format!(" Emulators ({}) ", app.devices.len())
       } else {
-        format!(" Emulators ({}/{}) ", visible_count, total_count)
+        format!(" Emulators ({}/{}) ", app.filtered.len(), app.devices.len())
       };
 
-      // Emulator list items
-      let items: Vec<ListItem> = app
-        .filtered_indices
-        .iter()
-        .map(|&i| {
-          let entry = &app.entries[i];
-          match entry {
-            EmulatorEntry::SectionHeader(s) => ListItem::new(Line::from(Span::styled(
-              format!(" {}", s),
-              Style::default()
-                .fg(theme.header_fg)
-                .add_modifier(Modifier::BOLD),
-            ))),
-            EmulatorEntry::Device(d) => ListItem::new(Line::from(vec![
-              Span::raw("   "),
-              Span::styled(&d.name, Style::default().fg(theme.name_fg)),
-              Span::raw("  "),
-              state_span(&d.state, theme),
-              Span::styled(
-                format!("  ({})", d.meta),
-                Style::default().fg(theme.meta_fg),
-              ),
-            ])),
-          }
-        })
-        .collect();
+      // Rows: a heading whenever the platform changes, then the device. The
+      // devices are grouped by platform, so this yields one heading per group.
+      let mut items: Vec<ListItem> = Vec::new();
+      let mut selected_row = None;
+      let mut group: Option<Platform> = None;
+      for (pos, &index) in app.filtered.iter().enumerate() {
+        let device = &app.devices[index];
+        if group != Some(device.platform) {
+          group = Some(device.platform);
+          items.push(header_row(device.platform, theme));
+        }
+        if pos == app.selected {
+          selected_row = Some(items.len());
+        }
+        items.push(device_row(device, theme));
+      }
+      app.list_state.select(selected_row);
 
       let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(list_title))

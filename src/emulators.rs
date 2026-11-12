@@ -114,25 +114,6 @@ impl fmt::Display for Device {
   }
 }
 
-/// A row of the TUI list: either a platform heading or a device.
-pub enum EmulatorEntry {
-  SectionHeader(String),
-  Device(Device),
-}
-
-impl EmulatorEntry {
-  pub fn display_name(&self) -> &str {
-    match self {
-      EmulatorEntry::SectionHeader(s) => s,
-      EmulatorEntry::Device(d) => &d.name,
-    }
-  }
-
-  pub fn is_header(&self) -> bool {
-    matches!(self, EmulatorEntry::SectionHeader(_))
-  }
-}
-
 fn get_android_emulator_cmd() -> Result<String, String> {
   config::get_android_emulator_cmd().map_err(|e: config::CommandNotFoundError| e.to_string())
 }
@@ -626,41 +607,30 @@ pub fn find_device(query: &str) -> Result<Device, String> {
 
 /// Result of gathering every platform's devices for the TUI.
 pub struct Collected {
-  pub entries: Vec<EmulatorEntry>,
+  /// Android devices first, then iOS.
+  pub devices: Vec<Device>,
   /// Why a platform could not be listed (e.g. a missing `adb`). Platforms that
   /// are simply unsupported on this OS are not reported.
   pub errors: Vec<String>,
 }
 
-/// Collect all emulators into a unified list with section headers
-pub fn collect_all_entries() -> Collected {
-  let mut entries = Vec::new();
+/// List the devices of every platform.
+pub fn collect_devices() -> Collected {
+  let mut devices = Vec::new();
   let mut errors = Vec::new();
 
   match list_android_emulators() {
-    Ok(android) if !android.is_empty() => {
-      entries.push(EmulatorEntry::SectionHeader(
-        Platform::Android.section_title().to_string(),
-      ));
-      entries.extend(android.into_iter().map(EmulatorEntry::Device));
-    }
-    Ok(_) => {}
+    Ok(android) => devices.extend(android),
     Err(e) => errors.push(e),
   }
 
   match list_ios_simulators() {
-    Ok(ios) if !ios.is_empty() => {
-      entries.push(EmulatorEntry::SectionHeader(
-        Platform::Ios.section_title().to_string(),
-      ));
-      entries.extend(ios.into_iter().map(EmulatorEntry::Device));
-    }
-    Ok(_) => {}
+    Ok(ios) => devices.extend(ios),
     Err(e) if e == ERR_IOS_ONLY_MACOS => {}
     Err(e) => errors.push(e),
   }
 
-  Collected { entries, errors }
+  Collected { devices, errors }
 }
 
 /// Format a plain text list for the `list` subcommand
