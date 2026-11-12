@@ -118,6 +118,7 @@ The `open` command matches against both `name` (display name) and `id` values, s
 - ratatui + crossterm for terminal UI
 - clap for CLI argument parsing
 - Scrollable list; the app keeps a flat `Vec<Device>` and inserts platform headings while building the rows
+- Devices are listed on a background thread (`App::start_loading` / `poll_loading`), so the UI opens at once with a spinner in the list title and `Ctrl+R` never blocks. The old list stays visible while a refresh runs; a second refresh is ignored until it finishes. If the first listing finds nothing, the loop ends and the reasons are printed after the terminal is restored. Android and iOS are listed in parallel (`list_all_platforms`)
 - Real-time substring filtering by typing (every printable key goes into the filter)
 - Arrows or `Ctrl+N`/`Ctrl+P` to navigate, `Enter` to launch, `Ctrl+R`/`F5` to refresh, `?`/`F1` for help, `Esc`/`Ctrl+C` to quit
 

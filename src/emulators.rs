@@ -668,15 +668,16 @@ pub struct Collected {
 
 /// List the devices of every platform.
 pub fn collect_devices() -> Collected {
+  let (android, ios) = list_all_platforms();
   let mut devices = Vec::new();
   let mut errors = Vec::new();
 
-  match list_android_emulators() {
+  match android {
     Ok(android) => devices.extend(android),
     Err(e) => errors.push(e),
   }
 
-  match list_ios_simulators() {
+  match ios {
     Ok(ios) => devices.extend(ios),
     Err(Error::IosUnsupported) => {}
     Err(e) => errors.push(e),
@@ -685,20 +686,32 @@ pub fn collect_devices() -> Collected {
   Collected { devices, errors }
 }
 
+/// List Android and iOS devices at the same time. Each side waits on external
+/// tools (`emulator`, `adb`, `xcrun`), so running them together takes as long
+/// as the slower one instead of the sum.
+fn list_all_platforms() -> (Result<Vec<Device>>, Result<Vec<Device>>) {
+  std::thread::scope(|scope| {
+    let ios = scope.spawn(list_ios_simulators);
+    let android = list_android_emulators();
+    (android, ios.join().expect("iOS listing thread panicked"))
+  })
+}
+
 /// Format a plain text list for the `list` subcommand
 pub fn format_emulator_list() -> String {
   let mut output = String::new();
 
+  let (android, ios) = list_all_platforms();
   let sections = [
     (
       Platform::Android,
-      list_android_emulators(),
+      android,
       "No Android emulators found",
       "Android emulators",
     ),
     (
       Platform::Ios,
-      list_ios_simulators(),
+      ios,
       "No iOS simulators found",
       "iOS simulators",
     ),
