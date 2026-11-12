@@ -44,7 +44,8 @@ impl ThemeName {
 
 fn parse_hex_color(s: &str) -> Option<Color> {
   let s = s.strip_prefix('#')?;
-  if s.len() != 6 {
+  // The slicing below is by byte offset, so reject anything non-ASCII first
+  if s.len() != 6 || !s.is_ascii() {
     return None;
   }
   let r = u8::from_str_radix(&s[0..2], 16).ok()?;
@@ -191,4 +192,15 @@ pub fn resolve_theme(theme_name: Option<&str>, overrides: Option<&ThemeOverrides
   }
 
   colors
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn hex_colors_with_multibyte_characters_are_rejected_not_a_panic() {
+    // "aébcd" is 6 bytes, so the length check passes, but byte 2 is in the middle of 'é'
+    assert_eq!(parse_hex_color("#aébcd"), None);
+  }
 }
