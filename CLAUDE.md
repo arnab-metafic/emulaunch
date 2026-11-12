@@ -62,9 +62,11 @@ cargo fmt
 
 ```
 src/
-  main.rs        — CLI entry point (clap) + TUI app loop (ratatui/crossterm)
+  main.rs        — CLI entry point (clap) + TUI app loop (ratatui)
   emulators.rs   — Core logic: listing, opening, types
+  error.rs       — Typed `Error` enum (thiserror) and `Result` alias
   config.rs      — Configuration loading (TOML file, env vars, platform defaults)
+  theme.rs       — TUI colour themes
 ```
 
 ### Configuration (`src/config.rs`)
@@ -83,10 +85,10 @@ Platform-specific default paths checked:
 
 ### Core Types (`src/emulators.rs`)
 
-- **`AndroidEmulator`** - `{name, id, device_type, state}`
-- **`IOSSimulator`** - `{name, udid, state, runtime}`
-- **`EmulatorType`** - Enum for `Android(String)` or `IOS(String)` identification
-- **`EmulatorEntry`** - Unified TUI display entry (SectionHeader, Android, or IOS)
+- **`Device`** - `{platform, name, id, state, meta}` for both Android emulators and iOS simulators. `id` is the AVD id or the simulator UDID; `meta` is the AVD kind (Android) or the runtime (iOS)
+- **`Platform`** - `Android` or `Ios`; owns per-platform wording (section title, detail labels)
+- **`State`** - `Booted`, `Shutdown` or `Other(String)`
+- **`Error`** (`src/error.rs`) - every fallible function returns `error::Result`
 
 ### Listing Logic
 
@@ -106,19 +108,19 @@ Running AVDs are detected via `adb devices` + `adb -s serial emu avd name` to ge
 - **Android**: `emulator -avd <name>` spawns the emulator process (uses `id` field)
 - **iOS**: `xcrun simctl boot <udid>` boots, then the GUI is opened by bundle id: Simulator.app (`com.apple.iphonesimulator`, with `-CurrentDeviceUDID`) on older Xcode, falling back to Device Hub (`com.apple.dt.Devices`) on Xcode 27+, which no longer ships Simulator.app
 
-The `open` command matches against both `name` (display name) and `id`/`udid` values, so either identifier can be used.
+The `open` command matches against both `name` (display name) and `id` values, so either identifier can be used. If a name matches several devices (same name on both platforms, or on two iOS runtimes) it fails and lists them; pass the id to pick one.
 
 ### TUI (`src/main.rs`)
 
 - ratatui + crossterm for terminal UI
 - clap for CLI argument parsing
-- Scrollable list with section headers
+- Scrollable list; the app keeps a flat `Vec<Device>` and inserts platform headings while building the rows
 - Real-time substring filtering by typing (every printable key goes into the filter)
 - Arrows or `Ctrl+N`/`Ctrl+P` to navigate, `Enter` to launch, `Ctrl+R`/`F5` to refresh, `?`/`F1` for help, `Esc`/`Ctrl+C` to quit
 
 ### Platform Guards
 
-iOS-specific code uses `#[cfg(target_os = "macos")]`. Non-macOS builds get stub functions that return `"iOS simulators are only available on macOS"`.
+iOS-specific code uses `#[cfg(target_os = "macos")]`. Non-macOS builds get stub functions that return `Error::IosUnsupported`.
 
 ## Release Workflow
 
