@@ -3,18 +3,14 @@ mod emulators;
 mod theme;
 
 use clap::{Parser, Subcommand};
-use crossterm::{
-  event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-  terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-  ExecutableCommand,
-};
 use emulators::{EmulatorEntry, EmulatorType};
 use ratatui::{
+  crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
   layout::{Constraint, Layout, Rect},
   style::{Modifier, Style},
   text::{Line, Span},
   widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
-  Terminal,
+  DefaultTerminal,
 };
 use std::io;
 
@@ -265,16 +261,12 @@ fn run_tui() -> io::Result<()> {
     cfg.as_ref().and_then(|c| c.theme_overrides.as_ref()),
   );
 
-  enable_raw_mode()?;
-  io::stdout().execute(EnterAlternateScreen)?;
-  let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
-  let mut terminal = Terminal::new(backend)?;
-
+  // init() enters raw mode + the alternate screen and installs a panic hook
+  // that restores the terminal; restore() always runs, even if run_app fails.
+  let mut terminal = ratatui::init();
   let mut app = App::new(entries);
   let result = run_app(&mut terminal, &mut app, &theme);
-
-  disable_raw_mode()?;
-  io::stdout().execute(LeaveAlternateScreen)?;
+  ratatui::restore();
 
   if let Some(msg) = app.result_message {
     println!("{}", msg);
@@ -284,7 +276,7 @@ fn run_tui() -> io::Result<()> {
 }
 
 fn run_app(
-  terminal: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>,
+  terminal: &mut DefaultTerminal,
   app: &mut App,
   theme: &theme::ThemeColors,
 ) -> io::Result<()> {

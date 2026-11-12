@@ -236,7 +236,6 @@ name = "emulaunch"
 version = "0.3.0"
 dependencies = [
  "clap",
- "crossterm",
  "dirs",
  "ratatui",
  "serde",
