@@ -178,7 +178,7 @@ impl App {
   /// Reload the emulator list in-place, preserving selection by name if possible.
   fn reload(&mut self) {
     let selected_name = self.selected_entry().map(|e| e.display_name().to_string());
-    self.entries = emulators::collect_all_entries();
+    self.entries = emulators::collect_all_entries().entries;
     self.apply_filter();
 
     // Try to restore selection by matching the previously selected display name
@@ -249,10 +249,14 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn run_tui() -> io::Result<()> {
-  let entries = emulators::collect_all_entries();
+  let emulators::Collected { entries, errors } = emulators::collect_all_entries();
   if entries.is_empty() {
-    println!("No emulators or simulators found.");
-    return Ok(());
+    if errors.is_empty() {
+      println!("No emulators or simulators found.");
+      return Ok(());
+    }
+    // Explain why nothing could be listed (e.g. adb / emulator not found)
+    return Err(io::Error::other(errors.join("\n\n")));
   }
 
   let cfg = config::load_config();

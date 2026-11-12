@@ -18,7 +18,6 @@ pub const DEVICE_TYPE_AVD: &str = "AVD";
 pub const DEVICE_TYPE_RUNNING: &str = "Running Device";
 
 // Error messages
-#[allow(dead_code)]
 pub const ERR_IOS_ONLY_MACOS: &str = "iOS simulators are only available on macOS";
 
 #[derive(Debug, Clone)]
@@ -419,31 +418,43 @@ pub fn find_emulator(name: &str) -> Result<EmulatorType, String> {
   Err(format!("Emulator '{}' not found", name))
 }
 
+/// Result of gathering every platform's devices for the TUI.
+pub struct Collected {
+  pub entries: Vec<EmulatorEntry>,
+  /// Why a platform could not be listed (e.g. a missing `adb`). Platforms that
+  /// are simply unsupported on this OS are not reported.
+  pub errors: Vec<String>,
+}
+
 /// Collect all emulators into a unified list with section headers
-pub fn collect_all_entries() -> Vec<EmulatorEntry> {
+pub fn collect_all_entries() -> Collected {
   let mut entries = Vec::new();
+  let mut errors = Vec::new();
 
-  let android = list_android_emulators().unwrap_or_default();
-  if !android.is_empty() {
-    entries.push(EmulatorEntry::SectionHeader(
-      SECTION_ANDROID_EMULATORS.to_string(),
-    ));
-    for emu in android {
-      entries.push(EmulatorEntry::Android(emu));
+  match list_android_emulators() {
+    Ok(android) if !android.is_empty() => {
+      entries.push(EmulatorEntry::SectionHeader(
+        SECTION_ANDROID_EMULATORS.to_string(),
+      ));
+      entries.extend(android.into_iter().map(EmulatorEntry::Android));
     }
+    Ok(_) => {}
+    Err(e) => errors.push(e),
   }
 
-  let ios = list_ios_simulators().unwrap_or_default();
-  if !ios.is_empty() {
-    entries.push(EmulatorEntry::SectionHeader(
-      SECTION_IOS_SIMULATORS.to_string(),
-    ));
-    for sim in ios {
-      entries.push(EmulatorEntry::IOS(sim));
+  match list_ios_simulators() {
+    Ok(ios) if !ios.is_empty() => {
+      entries.push(EmulatorEntry::SectionHeader(
+        SECTION_IOS_SIMULATORS.to_string(),
+      ));
+      entries.extend(ios.into_iter().map(EmulatorEntry::IOS));
     }
+    Ok(_) => {}
+    Err(e) if e == ERR_IOS_ONLY_MACOS => {}
+    Err(e) => errors.push(e),
   }
 
-  entries
+  Collected { entries, errors }
 }
 
 /// Open an emulator entry (non-header)
