@@ -29,3 +29,7 @@ toml = "0.8"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[profile.release]
+strip = true
+codegen-units = 1
