@@ -3,7 +3,7 @@ mod emulators;
 mod theme;
 
 use clap::{Parser, Subcommand};
-use emulators::{Device, EmulatorEntry};
+use emulators::{Device, EmulatorEntry, State};
 use ratatui::{
   crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
   layout::{Constraint, Layout, Rect},
@@ -181,34 +181,61 @@ impl App {
   }
 }
 
-/// Build the detail panel lines for the selected emulator (returns owned data to avoid borrow conflicts).
-struct DetailData {
-  kind: String,
-  fields: Vec<(String, String)>,
-}
-
-fn get_detail_data(app: &App) -> Option<DetailData> {
-  let device = app.selected_device()?;
-  Some(DetailData {
-    kind: device.platform.kind().to_string(),
-    fields: vec![
-      ("Name".to_string(), device.name.clone()),
-      (device.platform.id_label().to_string(), device.id.clone()),
-      ("State".to_string(), device.state.clone()),
-      (
-        device.platform.meta_label().to_string(),
-        device.meta.clone(),
-      ),
-    ],
-  })
-}
-
-fn state_color(state: &str, theme: &theme::ThemeColors) -> ratatui::style::Color {
+fn state_color(state: &State, theme: &theme::ThemeColors) -> ratatui::style::Color {
   match state {
-    emulators::STATE_BOOTED => theme.state_booted_fg,
-    emulators::STATE_SHUTDOWN => theme.state_shutdown_fg,
-    _ => theme.state_unknown_fg,
+    State::Booted => theme.state_booted_fg,
+    State::Shutdown => theme.state_shutdown_fg,
+    State::Other(_) => theme.state_unknown_fg,
   }
+}
+
+/// "● Booted" / "○ Shutdown", colored by state.
+fn state_span(state: &State, theme: &theme::ThemeColors) -> Span<'static> {
+  let dot = if state.is_booted() { "● " } else { "○ " };
+  Span::styled(
+    format!("{}{}", dot, state),
+    Style::default().fg(state_color(state, theme)),
+  )
+}
+
+/// The detail panel contents for one device.
+fn detail_lines<'a>(device: &'a Device, theme: &theme::ThemeColors) -> Vec<Line<'a>> {
+  let label = |text: &'a str| {
+    Line::from(Span::styled(
+      format!(" {}:", text),
+      Style::default()
+        .fg(theme.help_key_fg)
+        .add_modifier(Modifier::BOLD),
+    ))
+  };
+  let text = |value: &'a str| {
+    Line::from(vec![
+      Span::raw("   "),
+      Span::styled(value, Style::default().fg(theme.name_fg)),
+    ])
+  };
+
+  vec![
+    Line::from(Span::styled(
+      format!(" {}", device.platform.kind()),
+      Style::default()
+        .fg(theme.header_fg)
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+    )),
+    Line::from(""),
+    label("Name"),
+    text(&device.name),
+    Line::from(""),
+    label(device.platform.id_label()),
+    text(&device.id),
+    Line::from(""),
+    label("State"),
+    Line::from(vec![Span::raw("   "), state_span(&device.state, theme)]),
+    Line::from(""),
+    label(device.platform.meta_label()),
+    text(&device.meta),
+    Line::from(""),
+  ]
 }
 
 /// Return a centered Rect of fixed `width` x `height` within `area`.
@@ -322,26 +349,16 @@ fn run_app(
                 .fg(theme.header_fg)
                 .add_modifier(Modifier::BOLD),
             ))),
-            EmulatorEntry::Device(d) => {
-              let state_dot = if d.state == emulators::STATE_BOOTED {
-                "● "
-              } else {
-                "○ "
-              };
-              ListItem::new(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(&d.name, Style::default().fg(theme.name_fg)),
-                Span::raw("  "),
-                Span::styled(
-                  format!("{}{}", state_dot, d.state),
-                  Style::default().fg(state_color(&d.state, theme)),
-                ),
-                Span::styled(
-                  format!("  ({})", d.meta),
-                  Style::default().fg(theme.meta_fg),
-                ),
-              ]))
-            }
+            EmulatorEntry::Device(d) => ListItem::new(Line::from(vec![
+              Span::raw("   "),
+              Span::styled(&d.name, Style::default().fg(theme.name_fg)),
+              Span::raw("  "),
+              state_span(&d.state, theme),
+              Span::styled(
+                format!("  ({})", d.meta),
+                Style::default().fg(theme.meta_fg),
+              ),
+            ])),
           }
         })
         .collect();
@@ -357,49 +374,9 @@ fn run_app(
 
       // Detail panel — shown when terminal is wide enough
       if let Some(detail_area) = detail_area_opt {
-        let detail_data = get_detail_data(app);
-        let detail_lines: Vec<Line> = if let Some(data) = detail_data {
-          let mut lines = vec![
-            Line::from(Span::styled(
-              format!(" {}", data.kind),
-              Style::default()
-                .fg(theme.header_fg)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            )),
-            Line::from(""),
-          ];
-          for (label, value) in &data.fields {
-            lines.push(Line::from(Span::styled(
-              format!(" {}:", label),
-              Style::default()
-                .fg(theme.help_key_fg)
-                .add_modifier(Modifier::BOLD),
-            )));
-            // State field gets a colored dot indicator
-            if label == "State" {
-              let dot = if value == emulators::STATE_BOOTED {
-                "● "
-              } else {
-                "○ "
-              };
-              lines.push(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(
-                  format!("{}{}", dot, value),
-                  Style::default().fg(state_color(value, theme)),
-                ),
-              ]));
-            } else {
-              lines.push(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(value.clone(), Style::default().fg(theme.name_fg)),
-              ]));
-            }
-            lines.push(Line::from(""));
-          }
-          lines
-        } else {
-          vec![
+        let detail_lines: Vec<Line> = match app.selected_device() {
+          Some(device) => detail_lines(device, theme),
+          None => vec![
             Line::from(""),
             Line::from(Span::styled(
               " Select an emulator",
@@ -409,7 +386,7 @@ fn run_app(
               " to see details",
               Style::default().fg(theme.meta_fg),
             )),
-          ]
+          ],
         };
 
         let detail_widget = Paragraph::new(detail_lines)

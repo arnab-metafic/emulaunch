@@ -3,12 +3,6 @@ use crate::config;
 use std::fmt;
 use std::process::Stdio;
 
-// State constants
-pub const STATE_BOOTED: &str = "Booted";
-pub const STATE_SHUTDOWN: &str = "Shutdown";
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub const STATE_AVAILABLE: &str = "Available";
-
 // Device types
 pub const DEVICE_TYPE_AVD: &str = "AVD";
 pub const DEVICE_TYPE_RUNNING: &str = "Running Device";
@@ -55,6 +49,42 @@ impl Platform {
   }
 }
 
+/// Whether a device is running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum State {
+  Booted,
+  Shutdown,
+  /// Any other state reported by the platform tooling, e.g. "Shutting Down".
+  Other(String),
+}
+
+impl State {
+  pub fn is_booted(&self) -> bool {
+    matches!(self, State::Booted)
+  }
+
+  /// Parse a simctl state. Only used for iOS, but compiled everywhere so the
+  /// `Other` variant counts as constructed on every platform.
+  #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+  fn from_simctl(state: &str) -> State {
+    match state {
+      "Booted" => State::Booted,
+      "Shutdown" => State::Shutdown,
+      other => State::Other(other.to_string()),
+    }
+  }
+}
+
+impl fmt::Display for State {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      State::Booted => f.write_str("Booted"),
+      State::Shutdown => f.write_str("Shutdown"),
+      State::Other(s) => f.write_str(s),
+    }
+  }
+}
+
 /// An Android emulator (AVD) or iOS simulator.
 #[derive(Debug, Clone)]
 pub struct Device {
@@ -63,7 +93,7 @@ pub struct Device {
   pub name: String,
   /// What the platform tooling identifies it by: the AVD id or the simulator UDID.
   pub id: String,
-  pub state: String,
+  pub state: State,
   /// Platform-specific extra: the AVD kind on Android, the runtime on iOS.
   pub meta: String,
 }
@@ -207,7 +237,7 @@ fn list_avds_from_directory() -> Result<Vec<Device>, String> {
             platform: Platform::Android,
             name: display_name,
             id: stem.to_string(),
-            state: STATE_SHUTDOWN.to_string(),
+            state: State::Shutdown,
             meta: DEVICE_TYPE_AVD.to_string(),
           });
         }
@@ -241,9 +271,9 @@ pub fn list_android_emulators() -> Result<Vec<Device>, String> {
             let id = line.trim().to_string();
             let name = get_avd_display_name(&id).unwrap_or_else(|| id.clone());
             let state = if running_names.contains(&id) {
-              STATE_BOOTED.to_string()
+              State::Booted
             } else {
-              STATE_SHUTDOWN.to_string()
+              State::Shutdown
             };
             Device {
               platform: Platform::Android,
@@ -263,11 +293,7 @@ pub fn list_android_emulators() -> Result<Vec<Device>, String> {
   }?;
 
   // Sort: booted first
-  emulators.sort_by(|a, b| {
-    let a_booted = a.state == STATE_BOOTED;
-    let b_booted = b.state == STATE_BOOTED;
-    b_booted.cmp(&a_booted)
-  });
+  emulators.sort_by_key(|d| std::cmp::Reverse(d.state.is_booted()));
 
   Ok(emulators)
 }
@@ -307,7 +333,7 @@ fn list_android_devices_via_adb() -> Result<Vec<Device>, String> {
           platform: Platform::Android,
           name,
           id,
-          state: STATE_BOOTED.to_string(),
+          state: State::Booted,
           meta: DEVICE_TYPE_RUNNING.to_string(),
         })
       })
@@ -393,15 +419,13 @@ fn parse_ios_simulators(json: &str) -> Result<Vec<Device>, String> {
             continue;
           };
 
-          if matches!(state, STATE_BOOTED | STATE_SHUTDOWN | STATE_AVAILABLE) {
-            simulators.push(Device {
-              platform: Platform::Ios,
-              name: name.to_string(),
-              id: udid.to_string(),
-              state: state.to_string(),
-              meta: pretty_runtime(runtime),
-            });
-          }
+          simulators.push(Device {
+            platform: Platform::Ios,
+            name: name.to_string(),
+            id: udid.to_string(),
+            state: State::from_simctl(state),
+            meta: pretty_runtime(runtime),
+          });
         }
       }
     }
