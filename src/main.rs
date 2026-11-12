@@ -6,7 +6,7 @@ mod theme;
 use clap::{Parser, Subcommand};
 use emulators::{Device, Platform, State};
 use ratatui::{
-  crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+  crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
   layout::{Constraint, Layout, Rect},
   style::{Modifier, Style},
   text::{Line, Span},
@@ -112,11 +112,16 @@ impl App {
     self.devices.get(index)
   }
 
-  /// Reload the device list in-place, keeping the same device selected if it
-  /// is still listed.
+  /// Reload the device list in-place.
   fn reload(&mut self) {
+    self.replace_devices(emulators::collect_devices().devices);
+  }
+
+  /// Swap in a new device list, keeping the same device selected if it is
+  /// still listed.
+  fn replace_devices(&mut self, devices: Vec<Device>) {
     let previous = self.selected_device().map(|d| (d.platform, d.id.clone()));
-    self.devices = emulators::collect_devices().devices;
+    self.devices = devices;
     self.apply_filter();
 
     if let Some((platform, id)) = previous {
@@ -128,6 +133,92 @@ impl App {
       }
     }
   }
+
+  /// Update the state for one key press and say what the event loop should do.
+  fn handle_key(&mut self, key: KeyEvent) -> Action {
+    // When the help overlay is open, only handle overlay-dismissal keys
+    if self.show_help {
+      if matches!(
+        key.code,
+        KeyCode::Esc | KeyCode::Char('q' | '?') | KeyCode::F(1)
+      ) {
+        self.show_help = false;
+      }
+      return Action::Continue;
+    }
+
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+      KeyCode::Esc => return Action::Quit,
+      KeyCode::Char('c') if ctrl => return Action::Quit,
+      KeyCode::Char('?') if self.filter.is_empty() => self.show_help = true,
+      KeyCode::F(1) => self.show_help = true,
+      KeyCode::Char('r') if ctrl => return Action::Reload,
+      KeyCode::F(5) => return Action::Reload,
+      KeyCode::Char('u') if ctrl => {
+        self.filter.clear();
+        self.apply_filter();
+      }
+      KeyCode::Char('n') if ctrl => self.move_selection(1),
+      KeyCode::Char('p') if ctrl => self.move_selection(-1),
+      KeyCode::Down => self.move_selection(1),
+      KeyCode::Up => self.move_selection(-1),
+      KeyCode::Enter if self.selected_device().is_some() => return Action::Open,
+      KeyCode::Backspace => {
+        self.filter.pop();
+        self.apply_filter();
+      }
+      // Ignore other Ctrl/Alt chords so they don't end up in the filter
+      KeyCode::Char(_)
+        if key
+          .modifiers
+          .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {}
+      KeyCode::Char(c) => {
+        self.filter.push(c);
+        self.apply_filter();
+      }
+      _ => {}
+    }
+    Action::Continue
+  }
+}
+
+/// What the event loop should do after a key press.
+#[derive(Debug, PartialEq, Eq)]
+enum Action {
+  Continue,
+  Quit,
+  /// Re-list the devices.
+  Reload,
+  /// Launch the selected device and exit.
+  Open,
+}
+
+/// Build the list rows: a heading whenever the platform changes, then the
+/// device. Devices are grouped by platform, so this yields one heading per
+/// group. Also returns the row to highlight for the `selected` position
+/// within `filtered`.
+fn list_rows<'a>(
+  devices: &'a [Device],
+  filtered: &[usize],
+  selected: usize,
+  theme: &theme::ThemeColors,
+) -> (Vec<ListItem<'a>>, Option<usize>) {
+  let mut items = Vec::new();
+  let mut selected_row = None;
+  let mut group: Option<Platform> = None;
+  for (pos, &index) in filtered.iter().enumerate() {
+    let device = &devices[index];
+    if group != Some(device.platform) {
+      group = Some(device.platform);
+      items.push(header_row(device.platform, theme));
+    }
+    if pos == selected {
+      selected_row = Some(items.len());
+    }
+    items.push(device_row(device, theme));
+  }
+  (items, selected_row)
 }
 
 fn state_color(state: &State, theme: &theme::ThemeColors) -> ratatui::style::Color {
@@ -369,22 +460,7 @@ fn run_app(
         format!(" Emulators ({}/{}) ", app.filtered.len(), app.devices.len())
       };
 
-      // Rows: a heading whenever the platform changes, then the device. The
-      // devices are grouped by platform, so this yields one heading per group.
-      let mut items: Vec<ListItem> = Vec::new();
-      let mut selected_row = None;
-      let mut group: Option<Platform> = None;
-      for (pos, &index) in app.filtered.iter().enumerate() {
-        let device = &app.devices[index];
-        if group != Some(device.platform) {
-          group = Some(device.platform);
-          items.push(header_row(device.platform, theme));
-        }
-        if pos == app.selected {
-          selected_row = Some(items.len());
-        }
-        items.push(device_row(device, theme));
-      }
+      let (items, selected_row) = list_rows(&app.devices, &app.filtered, app.selected, theme);
       app.list_state.select(selected_row);
 
       let list = List::new(items)
@@ -434,61 +510,20 @@ fn run_app(
           continue;
         }
 
-        // When the help overlay is open, only handle overlay-dismissal keys
-        if app.show_help {
-          match key.code {
-            KeyCode::Esc | KeyCode::Char('q' | '?') | KeyCode::F(1) => {
-              app.show_help = false;
-            }
-            _ => {}
-          }
-          continue;
-        }
-
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-          KeyCode::Esc => break,
-          KeyCode::Char('c') if ctrl => break,
-          KeyCode::Char('?') if app.filter.is_empty() => app.show_help = true,
-          KeyCode::F(1) => app.show_help = true,
-          KeyCode::Char('r') if ctrl => app.reload(),
-          KeyCode::F(5) => app.reload(),
-          KeyCode::Char('u') if ctrl => {
-            app.filter.clear();
-            app.apply_filter();
-          }
-          KeyCode::Char('n') if ctrl => app.move_selection(1),
-          KeyCode::Char('p') if ctrl => app.move_selection(-1),
-          KeyCode::Down => app.move_selection(1),
-          KeyCode::Up => app.move_selection(-1),
-          KeyCode::Enter => {
+        match app.handle_key(key) {
+          Action::Continue => {}
+          Action::Quit => break,
+          Action::Reload => app.reload(),
+          Action::Open => {
             if let Some(device) = app.selected_device() {
-              match device.open() {
-                Ok(msg) => {
-                  app.result_message = Some(msg);
-                  break;
-                }
-                Err(e) => {
-                  app.result_message = Some(format!("Error: {}", e));
-                  break;
-                }
-              }
+              let message = match device.open() {
+                Ok(msg) => msg,
+                Err(e) => format!("Error: {}", e),
+              };
+              app.result_message = Some(message);
             }
+            break;
           }
-          KeyCode::Backspace => {
-            app.filter.pop();
-            app.apply_filter();
-          }
-          // Ignore other Ctrl/Alt chords so they don't end up in the filter
-          KeyCode::Char(_)
-            if key
-              .modifiers
-              .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {}
-          KeyCode::Char(c) => {
-            app.filter.push(c);
-            app.apply_filter();
-          }
-          _ => {}
         }
       }
     }
