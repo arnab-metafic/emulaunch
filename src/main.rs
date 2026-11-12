@@ -4,7 +4,7 @@ mod error;
 mod theme;
 
 use clap::{Parser, Subcommand};
-use emulators::{Device, Platform, State};
+use emulators::{Collected, Device, Platform, State};
 use ratatui::{
   crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
   layout::{Constraint, Layout, Rect},
@@ -14,6 +14,8 @@ use ratatui::{
   DefaultTerminal,
 };
 use std::io;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 
 #[derive(Parser)]
 #[command(version, about = "List and open Android/iOS emulators")]
@@ -71,7 +73,24 @@ struct App {
   filter: String,
   result_message: Option<String>,
   show_help: bool,
+  /// Receives the result of a listing running on a background thread.
+  loading: Option<Receiver<Collected>>,
+  /// Advances every frame to animate the spinner.
+  spinner_tick: usize,
+  /// Set when a listing finished without any device, so the loop can stop.
+  nothing_listed: Option<NothingListed>,
 }
+
+/// Why the picker has nothing to show after a listing.
+#[derive(Debug, PartialEq, Eq)]
+enum NothingListed {
+  /// Every platform answered, there just are no devices.
+  NoDevices,
+  /// A platform could not be listed; the text explains why.
+  Failed(String),
+}
+
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 impl App {
   fn new(devices: Vec<Device>) -> Self {
@@ -83,9 +102,68 @@ impl App {
       filter: String::new(),
       result_message: None,
       show_help: false,
+      loading: None,
+      spinner_tick: 0,
+      nothing_listed: None,
     };
     app.apply_filter();
     app
+  }
+
+  fn is_loading(&self) -> bool {
+    self.loading.is_some()
+  }
+
+  fn spinner(&self) -> &'static str {
+    SPINNER[self.spinner_tick % SPINNER.len()]
+  }
+
+  /// Run `list` on a background thread so the UI keeps responding. Does
+  /// nothing while a listing is already running.
+  fn start_loading(&mut self, list: impl FnOnce() -> Collected + Send + 'static) {
+    if self.is_loading() {
+      return;
+    }
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+      // The receiver is gone when the user quit meanwhile; nothing to do then.
+      let _ = tx.send(list());
+    });
+    self.loading = Some(rx);
+  }
+
+  /// Pick up the result of the background listing if it has finished.
+  fn poll_loading(&mut self) {
+    let Some(rx) = &self.loading else { return };
+    let collected = match rx.try_recv() {
+      Ok(collected) => collected,
+      Err(TryRecvError::Empty) => return,
+      // The thread died without answering (a panic): show an empty list
+      // rather than spinning forever.
+      Err(TryRecvError::Disconnected) => Collected {
+        devices: Vec::new(),
+        errors: Vec::new(),
+      },
+    };
+    self.loading = None;
+    self.apply_collected(collected);
+  }
+
+  /// Show a finished listing. If there was nothing to show before and there
+  /// still is not, record why so the loop can end with an explanation.
+  fn apply_collected(&mut self, collected: Collected) {
+    let Collected { devices, errors } = collected;
+    if devices.is_empty() && self.devices.is_empty() {
+      self.nothing_listed = Some(if errors.is_empty() {
+        NothingListed::NoDevices
+      } else {
+        // Explain why nothing could be listed (e.g. adb / emulator not found)
+        let reasons: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+        NothingListed::Failed(reasons.join("\n\n"))
+      });
+      return;
+    }
+    self.replace_devices(devices);
   }
 
   /// Recompute `filtered` from the filter text and select the first match.
@@ -110,11 +188,6 @@ impl App {
   fn selected_device(&self) -> Option<&Device> {
     let &index = self.filtered.get(self.selected)?;
     self.devices.get(index)
-  }
-
-  /// Reload the device list in-place.
-  fn reload(&mut self) {
-    self.replace_devices(emulators::collect_devices().devices);
   }
 
   /// Swap in a new device list, keeping the same device selected if it is
@@ -380,17 +453,6 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn run_tui() -> io::Result<()> {
-  let emulators::Collected { devices, errors } = emulators::collect_devices();
-  if devices.is_empty() {
-    if errors.is_empty() {
-      println!("No emulators or simulators found.");
-      return Ok(());
-    }
-    // Explain why nothing could be listed (e.g. adb / emulator not found)
-    let reasons: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-    return Err(io::Error::other(reasons.join("\n\n")));
-  }
-
   let cfg = config::load_config();
   let theme = theme::resolve_theme(
     cfg.as_ref().and_then(|c| c.theme.as_deref()),
@@ -400,12 +462,18 @@ fn run_tui() -> io::Result<()> {
   // init() enters raw mode + the alternate screen and installs a panic hook
   // that restores the terminal; restore() always runs, even if run_app fails.
   let mut terminal = ratatui::init();
-  let mut app = App::new(devices);
+  let mut app = App::new(Vec::new());
+  app.start_loading(emulators::collect_devices);
   let result = run_app(&mut terminal, &mut app, &theme);
   ratatui::restore();
 
   if let Some(msg) = app.result_message {
     println!("{}", msg);
+  }
+  match app.nothing_listed {
+    Some(NothingListed::NoDevices) => println!("No emulators or simulators found."),
+    Some(NothingListed::Failed(reasons)) => return Err(io::Error::other(reasons)),
+    None => {}
   }
 
   result
@@ -417,6 +485,12 @@ fn run_app(
   theme: &theme::ThemeColors,
 ) -> io::Result<()> {
   loop {
+    app.poll_loading();
+    if app.nothing_listed.is_some() {
+      break;
+    }
+    app.spinner_tick = app.spinner_tick.wrapping_add(1);
+
     terminal.draw(|frame| {
       let area = frame.area();
 
@@ -454,11 +528,14 @@ fn run_app(
       frame.render_widget(filter, chunks[0]);
 
       // List title with visible/total count
-      let list_title = if app.filter.is_empty() {
+      let mut list_title = if app.filter.is_empty() {
         format!(" Emulators ({}) ", app.devices.len())
       } else {
         format!(" Emulators ({}/{}) ", app.filtered.len(), app.devices.len())
       };
+      if app.is_loading() {
+        list_title = format!("{}{} Loading ", list_title, app.spinner());
+      }
 
       let (items, selected_row) = list_rows(&app.devices, &app.filtered, app.selected, theme);
       app.list_state.select(selected_row);
@@ -513,7 +590,7 @@ fn run_app(
         match app.handle_key(key) {
           Action::Continue => {}
           Action::Quit => break,
-          Action::Reload => app.reload(),
+          Action::Reload => app.start_loading(emulators::collect_devices),
           Action::Open => {
             if let Some(device) = app.selected_device() {
               let message = match device.open() {
@@ -863,6 +940,109 @@ mod tests {
   }
 
   // --- command line ----------------------------------------------------
+
+  fn collected(devices: Vec<Device>) -> Collected {
+    Collected {
+      devices,
+      errors: Vec::new(),
+    }
+  }
+
+  /// Poll until the background listing has been picked up.
+  fn wait_for_listing(app: &mut App) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.is_loading() {
+      assert!(std::time::Instant::now() < deadline, "listing never finished");
+      app.poll_loading();
+      thread::sleep(std::time::Duration::from_millis(1));
+    }
+  }
+
+  #[test]
+  fn background_listing_fills_the_list_when_it_finishes() {
+    let mut app = App::new(Vec::new());
+    app.start_loading(|| collected(vec![android("Pixel 8", "pixel8")]));
+    assert!(app.is_loading());
+    wait_for_listing(&mut app);
+    assert_eq!(names(&app), ["Pixel 8"]);
+    assert_eq!(app.nothing_listed, None);
+  }
+
+  #[test]
+  fn listing_is_not_visible_until_it_finishes() {
+    let (release, wait) = mpsc::channel::<()>();
+    let mut app = sample_app();
+    app.start_loading(move || {
+      wait.recv().unwrap();
+      collected(vec![android("New", "new")])
+    });
+    app.poll_loading();
+    assert!(app.is_loading());
+    assert_eq!(names(&app).len(), 3, "old list stays while refreshing");
+    release.send(()).unwrap();
+    wait_for_listing(&mut app);
+    assert_eq!(names(&app), ["New"]);
+  }
+
+  #[test]
+  fn a_second_refresh_is_ignored_while_one_is_running() {
+    let (release, wait) = mpsc::channel::<()>();
+    let mut app = App::new(Vec::new());
+    app.start_loading(move || {
+      wait.recv().unwrap();
+      collected(vec![android("First", "first")])
+    });
+    app.start_loading(|| collected(vec![android("Second", "second")]));
+    release.send(()).unwrap();
+    wait_for_listing(&mut app);
+    assert_eq!(names(&app), ["First"]);
+  }
+
+  #[test]
+  fn a_panicking_listing_ends_the_spinner_instead_of_hanging() {
+    let mut app = sample_app();
+    app.start_loading(|| panic!("boom"));
+    wait_for_listing(&mut app);
+    assert!(!app.is_loading());
+  }
+
+  #[test]
+  fn empty_first_listing_is_reported() {
+    let mut app = App::new(Vec::new());
+    app.apply_collected(collected(Vec::new()));
+    assert_eq!(app.nothing_listed, Some(NothingListed::NoDevices));
+  }
+
+  #[test]
+  fn failed_first_listing_carries_the_reasons() {
+    let mut app = App::new(Vec::new());
+    app.apply_collected(Collected {
+      devices: Vec::new(),
+      errors: vec![error::Error::NoAvdDirectory],
+    });
+    match app.nothing_listed {
+      Some(NothingListed::Failed(reasons)) => assert!(!reasons.is_empty()),
+      other => panic!("unexpected {:?}", other),
+    }
+  }
+
+  #[test]
+  fn refresh_that_finds_nothing_keeps_the_picker_open() {
+    let mut app = sample_app();
+    app.apply_collected(collected(Vec::new()));
+    assert_eq!(app.nothing_listed, None);
+    assert!(app.devices.is_empty());
+  }
+
+  #[test]
+  fn spinner_cycles_through_its_frames() {
+    let mut app = App::new(Vec::new());
+    let first = app.spinner();
+    app.spinner_tick = SPINNER.len();
+    assert_eq!(app.spinner(), first);
+    app.spinner_tick += 1;
+    assert_ne!(app.spinner(), first);
+  }
 
   #[test]
   fn command_line_definition_is_valid() {
