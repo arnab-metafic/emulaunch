@@ -86,44 +86,40 @@ Common locations:\n  macOS: ~/Library/Android/sdk/platform-tools/adb\n  Linux: ~
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const SUGGESTION_XCRUN: &str = "Install Xcode Command Line Tools: xcode-select --install";
 
-/// Platform-specific Android SDK paths
-fn get_android_emulator_paths() -> Vec<PathBuf> {
-  let home = match dirs::home_dir() {
-    Some(h) => h,
-    None => return Vec::new(),
-  };
+/// Candidate Android SDK roots, most specific first: `ANDROID_HOME`,
+/// `ANDROID_SDK_ROOT`, then the platform's default install location.
+fn android_sdk_roots() -> Vec<PathBuf> {
+  let mut roots: Vec<PathBuf> = ["ANDROID_HOME", "ANDROID_SDK_ROOT"]
+    .iter()
+    .filter_map(std::env::var_os)
+    .filter(|v| !v.is_empty())
+    .map(PathBuf::from)
+    .collect();
 
   #[cfg(target_os = "macos")]
-  return vec![home.join("Library/Android/sdk/emulator/emulator")];
-
+  roots.extend(dirs::home_dir().map(|h| h.join("Library/Android/sdk")));
   #[cfg(target_os = "linux")]
-  return vec![home.join("Android/Sdk/emulator/emulator")];
-
+  roots.extend(dirs::home_dir().map(|h| h.join("Android/Sdk")));
   #[cfg(target_os = "windows")]
-  return vec![home.join("AppData/Local/Android/Sdk/emulator/emulator.exe")];
+  roots.extend(dirs::data_local_dir().map(|d| d.join("Android/Sdk")));
 
-  #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-  return Vec::new();
+  roots
 }
 
-/// Platform-specific ADB paths
+/// Locations of an SDK tool (e.g. `emulator/emulator`, `platform-tools/adb`).
+fn android_sdk_tool_paths(relative: &str) -> Vec<PathBuf> {
+  android_sdk_roots()
+    .into_iter()
+    .map(|root| root.join(format!("{}{}", relative, std::env::consts::EXE_SUFFIX)))
+    .collect()
+}
+
+fn get_android_emulator_paths() -> Vec<PathBuf> {
+  android_sdk_tool_paths("emulator/emulator")
+}
+
 fn get_adb_paths() -> Vec<PathBuf> {
-  let home = match dirs::home_dir() {
-    Some(h) => h,
-    None => return Vec::new(),
-  };
-
-  #[cfg(target_os = "macos")]
-  return vec![home.join("Library/Android/sdk/platform-tools/adb")];
-
-  #[cfg(target_os = "linux")]
-  return vec![home.join("Android/Sdk/platform-tools/adb")];
-
-  #[cfg(target_os = "windows")]
-  return vec![home.join("AppData/Local/Android/Sdk/platform-tools/adb.exe")];
-
-  #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-  return Vec::new();
+  android_sdk_tool_paths("platform-tools/adb")
 }
 
 pub fn get_config_paths() -> Vec<PathBuf> {
