@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct Config {
@@ -158,14 +159,36 @@ fn get_config_paths_display() -> String {
     .join("\n")
 }
 
-pub fn load_config() -> Option<Config> {
-  for path in get_config_paths() {
-    if path.exists() {
-      let contents = std::fs::read_to_string(&path).ok()?;
-      return toml::from_str(&contents).ok();
-    }
+/// Load the config file once per process. A missing file yields `None`; an
+/// unreadable or invalid file is reported on stderr and then ignored.
+pub fn load_config() -> Option<&'static Config> {
+  static CONFIG: OnceLock<Option<Config>> = OnceLock::new();
+  CONFIG
+    .get_or_init(|| {
+      let path = get_config_paths().into_iter().find(|p| p.exists())?;
+      let parsed = std::fs::read_to_string(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|contents| toml::from_str(&contents).map_err(|e| e.to_string()));
+      match parsed {
+        Ok(config) => Some(config),
+        Err(e) => {
+          eprintln!("warning: ignoring {}: {}", path.display(), e);
+          None
+        }
+      }
+    })
+    .as_ref()
+}
+
+/// Print a warning to stderr at most once per process. Commands are resolved
+/// again on every TUI refresh, and repeated stderr output would corrupt the screen.
+fn warn_once(msg: String) {
+  static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+  let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+  if !seen.contains(&msg) {
+    eprintln!("warning: {}", msg);
+    seen.push(msg);
   }
-  None
 }
 
 /// True if `cmd` is a bare command found on PATH or a path to an executable file.
@@ -186,10 +209,11 @@ where
 {
   // Check config first
   if let Some(config) = load_config() {
-    if let Some(cmd) = config_key(&config) {
+    if let Some(cmd) = config_key(config) {
       if is_runnable(cmd) {
         return Ok(cmd.to_string());
       }
+      warn_once(format!("configured command '{}' not found, ignoring", cmd));
     }
   }
 
@@ -198,6 +222,7 @@ where
     if is_runnable(&cmd) {
       return Ok(cmd);
     }
+    warn_once(format!("${} is set to '{}' but not found, ignoring", env_var, cmd));
   }
 
   // Try platform-specific paths
