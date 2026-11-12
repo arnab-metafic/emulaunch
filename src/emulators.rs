@@ -717,3 +717,363 @@ pub fn format_emulator_list() -> String {
 
   output
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::ffi::OsString;
+  use std::path::{Path, PathBuf};
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
+  fn device(platform: Platform, name: &str, id: &str) -> Device {
+    Device {
+      platform,
+      name: name.to_string(),
+      id: id.to_string(),
+      state: State::Shutdown,
+      meta: String::new(),
+    }
+  }
+
+  /// A scratch directory that is removed when dropped.
+  struct TempDir(PathBuf);
+
+  impl TempDir {
+    fn new() -> Self {
+      static COUNTER: AtomicUsize = AtomicUsize::new(0);
+      let dir = std::env::temp_dir().join(format!(
+        "emulaunch-test-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+      ));
+      std::fs::create_dir_all(&dir).unwrap();
+      TempDir(dir)
+    }
+
+    fn path(&self) -> &Path {
+      &self.0
+    }
+
+    fn file(&self, relative: &str, contents: &str) {
+      let path = self.0.join(relative);
+      std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+      std::fs::write(path, contents).unwrap();
+    }
+
+    fn dir(&self, relative: &str) {
+      std::fs::create_dir_all(self.0.join(relative)).unwrap();
+    }
+  }
+
+  impl Drop for TempDir {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
+
+  // --- AVD home --------------------------------------------------------
+
+  #[test]
+  fn avd_home_prefers_android_avd_home() {
+    let dir = resolve_avd_home(
+      Some(OsString::from("/custom/avds")),
+      Some(OsString::from("/user")),
+      Some(PathBuf::from("/home/me")),
+    );
+    assert_eq!(dir, Some(PathBuf::from("/custom/avds")));
+  }
+
+  #[test]
+  fn avd_home_falls_back_to_android_user_home() {
+    let dir = resolve_avd_home(
+      None,
+      Some(OsString::from("/user")),
+      Some(PathBuf::from("/home/me")),
+    );
+    assert_eq!(dir, Some(PathBuf::from("/user/avd")));
+  }
+
+  #[test]
+  fn avd_home_defaults_to_dot_android_in_home() {
+    let dir = resolve_avd_home(None, None, Some(PathBuf::from("/home/me")));
+    assert_eq!(dir, Some(PathBuf::from("/home/me/.android/avd")));
+  }
+
+  #[test]
+  fn avd_home_is_none_without_any_input() {
+    assert_eq!(resolve_avd_home(None, None, None), None);
+  }
+
+  // --- config.ini ------------------------------------------------------
+
+  #[test]
+  fn display_name_is_read_from_config_ini() {
+    let ini = "AvdId=Pixel_8_Pro\navd.ini.displayname=Pixel 8 Pro\nhw.ramSize=2048\n";
+    assert_eq!(
+      display_name_from_config(ini),
+      Some("Pixel 8 Pro".to_string())
+    );
+  }
+
+  #[test]
+  fn display_name_is_trimmed() {
+    assert_eq!(
+      display_name_from_config("avd.ini.displayname=  Spaced  \r\n"),
+      Some("Spaced".to_string())
+    );
+  }
+
+  #[test]
+  fn display_name_is_none_when_key_is_missing() {
+    assert_eq!(
+      display_name_from_config("AvdId=Foo\nhw.ramSize=2048\n"),
+      None
+    );
+    assert_eq!(display_name_from_config(""), None);
+  }
+
+  // --- adb -------------------------------------------------------------
+
+  const ADB_DEVICES: &str = "List of devices attached\n\
+emulator-5554\tdevice\n\
+emulator-5556\toffline\n\
+R58M12ABCDE\tdevice\n\
+emulator-5558\tunauthorized\n";
+
+  #[test]
+  fn only_online_emulators_are_reported_as_running() {
+    assert_eq!(running_emulator_serials(ADB_DEVICES), vec!["emulator-5554"]);
+  }
+
+  #[test]
+  fn no_running_emulators_in_header_only_output() {
+    assert!(running_emulator_serials("List of devices attached\n\n").is_empty());
+    assert!(running_emulator_serials("").is_empty());
+  }
+
+  #[test]
+  fn avd_name_is_the_first_line_of_emu_output() {
+    assert_eq!(
+      avd_name_from_emu_output("Pixel_8_Pro\r\nOK\r\n"),
+      Some("Pixel_8_Pro".to_string())
+    );
+    assert_eq!(avd_name_from_emu_output(""), None);
+  }
+
+  #[test]
+  fn adb_long_listing_uses_the_model_as_the_name() {
+    let output = "List of devices attached\n\
+emulator-5554          device product:sdk_gphone64 model:Pixel_8 device:emu64a transport_id:1\n\
+0123456789ABCDEF       device usb:1-1 transport_id:2\n";
+    let devices = parse_adb_devices_long(output);
+
+    assert_eq!(devices.len(), 2);
+    assert_eq!(devices[0].name, "Pixel_8");
+    assert_eq!(devices[0].id, "emulator-5554");
+    assert_eq!(devices[0].meta, DEVICE_TYPE_RUNNING);
+    assert!(devices[0].state.is_booted());
+    // Without a model token the serial is used as the name
+    assert_eq!(devices[1].name, "0123456789ABCDEF");
+  }
+
+  // --- AVD directory scan ----------------------------------------------
+
+  #[test]
+  fn scan_finds_avds_that_have_both_ini_and_avd_directory() {
+    let tmp = TempDir::new();
+    tmp.file("Pixel_8.ini", "path=x\n");
+    tmp.file("Pixel_8.avd/config.ini", "avd.ini.displayname=Pixel 8\n");
+    tmp.file("Plain.ini", "path=x\n");
+    tmp.dir("Plain.avd");
+
+    let mut found = scan_avd_dir(tmp.path()).unwrap();
+    found.sort_by(|a, b| a.id.cmp(&b.id));
+
+    assert_eq!(found.len(), 2);
+    // Sorted by id: "Pixel_8" < "Plain"
+    assert_eq!(
+      (found[0].id.as_str(), found[0].name.as_str()),
+      ("Pixel_8", "Pixel 8")
+    );
+    assert_eq!(
+      (found[1].id.as_str(), found[1].name.as_str()),
+      ("Plain", "Plain")
+    );
+    assert!(found.iter().all(|d| d.platform == Platform::Android));
+    assert!(found.iter().all(|d| d.state == State::Shutdown));
+    assert!(found.iter().all(|d| d.meta == DEVICE_TYPE_AVD));
+  }
+
+  #[test]
+  fn scan_ignores_incomplete_avds() {
+    let tmp = TempDir::new();
+    tmp.file("NoDir.ini", "path=x\n"); // .ini without an .avd directory
+    tmp.dir("OnlyDir.avd"); // .avd directory without an .ini
+    tmp.file("notes.txt", "hello"); // unrelated file
+
+    assert!(matches!(
+      scan_avd_dir(tmp.path()),
+      Err(Error::NoAvds(dir)) if dir == tmp.path()
+    ));
+  }
+
+  #[test]
+  fn scan_reports_an_unreadable_directory() {
+    let tmp = TempDir::new();
+    let missing = tmp.path().join("does-not-exist");
+    assert!(matches!(scan_avd_dir(&missing), Err(Error::Io { .. })));
+  }
+
+  // --- choosing a device -----------------------------------------------
+
+  #[test]
+  fn select_device_matches_by_name_or_id() {
+    let devices = vec![
+      device(Platform::Android, "Pixel 8", "Pixel_8"),
+      device(Platform::Ios, "iPhone 17", "UDID-1"),
+    ];
+
+    assert_eq!(
+      select_device(devices.clone(), "Pixel 8").unwrap().id,
+      "Pixel_8"
+    );
+    assert_eq!(
+      select_device(devices.clone(), "Pixel_8").unwrap().id,
+      "Pixel_8"
+    );
+    assert_eq!(select_device(devices, "UDID-1").unwrap().name, "iPhone 17");
+  }
+
+  #[test]
+  fn select_device_reports_missing_devices() {
+    let devices = vec![device(Platform::Android, "Pixel 8", "Pixel_8")];
+    assert!(matches!(
+      select_device(devices, "nope"),
+      Err(Error::NotFound(name)) if name == "nope"
+    ));
+  }
+
+  #[test]
+  fn select_device_refuses_ambiguous_names_and_lists_the_choices() {
+    let devices = vec![
+      device(Platform::Android, "iPhone 17", "iphone17"),
+      device(Platform::Ios, "iPhone 17", "UDID-1"),
+    ];
+
+    match select_device(devices.clone(), "iPhone 17") {
+      Err(Error::Ambiguous { count, choices, .. }) => {
+        assert_eq!(count, 2);
+        assert!(choices.contains("iphone17"));
+        assert!(choices.contains("UDID-1"));
+      }
+      other => panic!("expected an ambiguity error, got {:?}", other),
+    }
+
+    // The id disambiguates
+    assert_eq!(
+      select_device(devices, "UDID-1").unwrap().platform,
+      Platform::Ios
+    );
+  }
+
+  // --- simctl ----------------------------------------------------------
+
+  #[test]
+  fn runtime_identifiers_are_made_readable() {
+    let cases = [
+      ("com.apple.CoreSimulator.SimRuntime.iOS-17-0", "iOS 17.0"),
+      (
+        "com.apple.CoreSimulator.SimRuntime.iOS-26-4-1",
+        "iOS 26.4.1",
+      ),
+      (
+        "com.apple.CoreSimulator.SimRuntime.watchOS-10-2",
+        "watchOS 10.2",
+      ),
+      (
+        "com.apple.CoreSimulator.SimRuntime.iOS-27-2-iPhone19-4",
+        "iOS 27.2 - iPhone19-4",
+      ),
+      ("com.apple.CoreSimulator.SimRuntime.visionOS", "visionOS"),
+      ("something.else", "something.else"),
+    ];
+    for (input, expected) in cases {
+      assert_eq!(pretty_runtime(input), expected, "for {}", input);
+    }
+  }
+
+  const SIMCTL_JSON: &str = r#"{
+    "devices": {
+      "com.apple.CoreSimulator.SimRuntime.iOS-17-0": [
+        {"name": "iPhone 15", "udid": "AAAA", "state": "Shutdown", "isAvailable": true},
+        {"name": "iPhone 15 Pro", "udid": "BBBB", "state": "Booted", "isAvailable": true},
+        {"name": "Broken entry without udid", "state": "Shutdown"}
+      ],
+      "com.apple.CoreSimulator.SimRuntime.iOS-16-4": [
+        {"name": "iPad", "udid": "CCCC", "state": "Shutting Down"}
+      ],
+      "com.apple.CoreSimulator.SimRuntime.tvOS-17-0": []
+    }
+  }"#;
+
+  #[test]
+  fn simctl_json_is_parsed_into_devices() {
+    let mut devices = parse_ios_simulators(SIMCTL_JSON).unwrap();
+    devices.sort_by(|a, b| a.id.cmp(&b.id));
+
+    assert_eq!(devices.len(), 3, "entry without a udid is skipped");
+    assert!(devices.iter().all(|d| d.platform == Platform::Ios));
+
+    assert_eq!(devices[0].name, "iPhone 15");
+    assert_eq!(devices[0].state, State::Shutdown);
+    assert_eq!(devices[0].meta, "iOS 17.0");
+
+    assert_eq!(devices[1].state, State::Booted);
+
+    assert_eq!(devices[2].name, "iPad");
+    assert_eq!(devices[2].state, State::Other("Shutting Down".to_string()));
+    assert_eq!(devices[2].meta, "iOS 16.4");
+  }
+
+  #[test]
+  fn simctl_json_without_devices_gives_an_empty_list() {
+    assert!(parse_ios_simulators(r#"{"devices": {}}"#)
+      .unwrap()
+      .is_empty());
+  }
+
+  #[test]
+  fn invalid_simctl_json_is_an_error() {
+    assert!(matches!(
+      parse_ios_simulators("not json"),
+      Err(Error::ParseSimctl(_))
+    ));
+  }
+
+  // --- small helpers ---------------------------------------------------
+
+  #[test]
+  fn tail_lines_keeps_the_last_lines() {
+    assert_eq!(tail_lines("a\nb\nc\nd", 2), "c\nd");
+    assert_eq!(tail_lines("a\nb", 8), "a\nb");
+    assert_eq!(tail_lines("", 8), "");
+  }
+
+  #[test]
+  fn device_display_is_name_state_and_meta() {
+    let mut d = device(Platform::Ios, "iPhone 15", "AAAA");
+    d.state = State::Booted;
+    d.meta = "iOS 17.0".to_string();
+    assert_eq!(d.to_string(), "iPhone 15 [Booted] (iOS 17.0)");
+  }
+
+  #[test]
+  fn state_text_and_booted_flag() {
+    assert_eq!(State::Booted.to_string(), "Booted");
+    assert_eq!(State::Shutdown.to_string(), "Shutdown");
+    assert_eq!(State::Other("Creating".into()).to_string(), "Creating");
+    assert!(State::Booted.is_booted());
+    assert!(!State::Shutdown.is_booted());
+    assert!(!State::Other("Creating".into()).is_booted());
+  }
+}
