@@ -129,26 +129,65 @@ fn get_xcrun_cmd() -> Result<String> {
 /// `$ANDROID_AVD_HOME`, else `$ANDROID_USER_HOME/avd`, else `~/.android/avd`.
 fn avd_home() -> Option<std::path::PathBuf> {
   let env_dir = |var| std::env::var_os(var).filter(|v| !v.is_empty());
-  if let Some(dir) = env_dir("ANDROID_AVD_HOME") {
+  resolve_avd_home(
+    env_dir("ANDROID_AVD_HOME"),
+    env_dir("ANDROID_USER_HOME"),
+    dirs::home_dir(),
+  )
+}
+
+/// The precedence rules behind [`avd_home`], with the environment passed in.
+fn resolve_avd_home(
+  avd_home: Option<std::ffi::OsString>,
+  user_home: Option<std::ffi::OsString>,
+  home: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+  if let Some(dir) = avd_home {
     return Some(dir.into());
   }
-  if let Some(dir) = env_dir("ANDROID_USER_HOME") {
+  if let Some(dir) = user_home {
     return Some(std::path::PathBuf::from(dir).join("avd"));
   }
-  dirs::home_dir().map(|h| h.join(".android").join("avd"))
+  home.map(|h| h.join(".android").join("avd"))
+}
+
+/// The `avd.ini.displayname` value from the text of an AVD's config.ini.
+fn display_name_from_config(contents: &str) -> Option<String> {
+  contents
+    .lines()
+    .find_map(|line| line.strip_prefix("avd.ini.displayname="))
+    .map(|s| s.trim().to_string())
 }
 
 /// Read the display name from an AVD's config.ini
+fn read_display_name(avd_dir: &std::path::Path, avd_id: &str) -> Option<String> {
+  let config_path = avd_dir.join(format!("{}.avd", avd_id)).join("config.ini");
+  display_name_from_config(&std::fs::read_to_string(config_path).ok()?)
+}
+
 fn get_avd_display_name(avd_id: &str) -> Option<String> {
-  let config_path = avd_home()?
-    .join(format!("{}.avd", avd_id))
-    .join("config.ini");
-  let contents = std::fs::read_to_string(config_path).ok()?;
-  contents
+  read_display_name(&avd_home()?, avd_id)
+}
+
+/// Serials of the emulators that `adb devices` reports as online.
+fn running_emulator_serials(adb_devices_output: &str) -> Vec<String> {
+  adb_devices_output
     .lines()
-    .find(|line| line.starts_with("avd.ini.displayname="))
-    .and_then(|line| line.strip_prefix("avd.ini.displayname="))
-    .map(|s| s.trim().to_string())
+    .skip(1)
+    .filter_map(|line| {
+      let parts: Vec<&str> = line.split_whitespace().collect();
+      if parts.len() >= 2 && parts[1] == "device" && parts[0].starts_with("emulator-") {
+        Some(parts[0].to_string())
+      } else {
+        None
+      }
+    })
+    .collect()
+}
+
+/// The AVD id from the output of `adb -s <serial> emu avd name`.
+fn avd_name_from_emu_output(output: &str) -> Option<String> {
+  output.lines().next().map(|s| s.trim().to_string())
 }
 
 /// Get the set of AVD names that are currently running via adb
@@ -164,19 +203,7 @@ fn get_running_avd_names() -> Result<Vec<String>> {
     return Ok(Vec::new());
   }
 
-  let stdout = String::from_utf8_lossy(&output.stdout);
-  let serials: Vec<String> = stdout
-    .lines()
-    .skip(1)
-    .filter_map(|line| {
-      let parts: Vec<&str> = line.split_whitespace().collect();
-      if parts.len() >= 2 && parts[1] == "device" && parts[0].starts_with("emulator-") {
-        Some(parts[0].to_string())
-      } else {
-        None
-      }
-    })
-    .collect();
+  let serials = running_emulator_serials(&String::from_utf8_lossy(&output.stdout));
 
   let names = serials
     .iter()
@@ -186,8 +213,7 @@ fn get_running_avd_names() -> Result<Vec<String>> {
         .output()
         .ok()?;
       if result.status.success() {
-        let stdout = String::from_utf8_lossy(&result.stdout);
-        stdout.lines().next().map(|s| s.trim().to_string())
+        avd_name_from_emu_output(&String::from_utf8_lossy(&result.stdout))
       } else {
         None
       }
@@ -197,11 +223,14 @@ fn get_running_avd_names() -> Result<Vec<String>> {
   Ok(names)
 }
 
-/// List AVDs by scanning ~/.android/avd/ directory
+/// List AVDs by scanning the AVD directory
 fn list_avds_from_directory() -> Result<Vec<Device>> {
-  let avd_dir = avd_home().ok_or(Error::NoAvdDirectory)?;
+  scan_avd_dir(&avd_home().ok_or(Error::NoAvdDirectory)?)
+}
 
-  let entries = std::fs::read_dir(&avd_dir).map_err(Error::io("Cannot read AVD directory"))?;
+/// List the AVDs defined in `avd_dir`: each `<id>.ini` that has a matching `<id>.avd/` directory.
+fn scan_avd_dir(avd_dir: &std::path::Path) -> Result<Vec<Device>> {
+  let entries = std::fs::read_dir(avd_dir).map_err(Error::io("Cannot read AVD directory"))?;
 
   let mut emulators = Vec::new();
   for entry in entries.flatten() {
@@ -210,7 +239,7 @@ fn list_avds_from_directory() -> Result<Vec<Device>> {
       if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
         // Verify the .avd directory exists
         if avd_dir.join(format!("{}.avd", stem)).is_dir() {
-          let display_name = get_avd_display_name(stem).unwrap_or_else(|| stem.to_string());
+          let display_name = read_display_name(avd_dir, stem).unwrap_or_else(|| stem.to_string());
           emulators.push(Device {
             platform: Platform::Android,
             name: display_name,
@@ -224,7 +253,7 @@ fn list_avds_from_directory() -> Result<Vec<Device>> {
   }
 
   if emulators.is_empty() {
-    Err(Error::NoAvds(avd_dir))
+    Err(Error::NoAvds(avd_dir.to_path_buf()))
   } else {
     Ok(emulators)
   }
@@ -291,32 +320,36 @@ fn list_android_devices_via_adb() -> Result<Vec<Device>> {
     });
   }
 
-  let stdout = String::from_utf8_lossy(&output.stdout);
-  Ok(
-    stdout
-      .lines()
-      .skip(1)
-      .filter(|line| !line.is_empty() && line.contains("device"))
-      .filter_map(|line| {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        let id = parts.first().map(|s| s.to_string())?;
-        let name = parts
-          .iter()
-          .find(|p| p.starts_with("model:"))
-          .and_then(|p| p.strip_prefix("model:"))
-          .map(|s| s.to_string())
-          .unwrap_or_else(|| id.clone());
+  Ok(parse_adb_devices_long(&String::from_utf8_lossy(
+    &output.stdout,
+  )))
+}
 
-        Some(Device {
-          platform: Platform::Android,
-          name,
-          id,
-          state: State::Booted,
-          meta: DEVICE_TYPE_RUNNING.to_string(),
-        })
+/// Parse the output of `adb devices -l` into running devices.
+fn parse_adb_devices_long(output: &str) -> Vec<Device> {
+  output
+    .lines()
+    .skip(1)
+    .filter(|line| !line.is_empty() && line.contains("device"))
+    .filter_map(|line| {
+      let parts: Vec<&str> = line.split_whitespace().collect();
+      let id = parts.first().map(|s| s.to_string())?;
+      let name = parts
+        .iter()
+        .find(|p| p.starts_with("model:"))
+        .and_then(|p| p.strip_prefix("model:"))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| id.clone());
+
+      Some(Device {
+        platform: Platform::Android,
+        name,
+        id,
+        state: State::Booted,
+        meta: DEVICE_TYPE_RUNNING.to_string(),
       })
-      .collect(),
-  )
+    })
+    .collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -349,7 +382,7 @@ pub fn list_ios_simulators() -> Result<Vec<Device>> {
 /// non-numeric trailing part (device-specific runtimes such as
 /// `iOS-27-2-iPhone19-4`) is appended after a dash. Unrecognised identifiers
 /// are returned unchanged.
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn pretty_runtime(identifier: &str) -> String {
   let Some(rest) = identifier.strip_prefix("com.apple.CoreSimulator.SimRuntime.") else {
     return identifier.to_string();
@@ -371,7 +404,7 @@ fn pretty_runtime(identifier: &str) -> String {
   }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn parse_ios_simulators(json: &str) -> Result<Vec<Device>> {
   #[derive(serde::Deserialize)]
   struct DevicesResponse {
@@ -433,9 +466,13 @@ const LAUNCH_GRACE: std::time::Duration = std::time::Duration::from_millis(1500)
 
 /// Last few lines of the emulator log, for error messages.
 fn log_tail(path: &std::path::Path) -> String {
-  let contents = std::fs::read_to_string(path).unwrap_or_default();
-  let lines: Vec<&str> = contents.lines().collect();
-  lines[lines.len().saturating_sub(8)..].join("\n")
+  tail_lines(&std::fs::read_to_string(path).unwrap_or_default(), 8)
+}
+
+/// The last `count` lines of `text`.
+fn tail_lines(text: &str, count: usize) -> String {
+  let lines: Vec<&str> = text.lines().collect();
+  lines[lines.len().saturating_sub(count)..].join("\n")
 }
 
 pub fn open_android_emulator(avd: &str) -> Result<String> {
@@ -575,10 +612,18 @@ pub fn open_ios_simulator(_udid: &str) -> Result<String> {
 /// Fails when nothing matches, or when several do (the same name on both
 /// platforms, or on two iOS runtimes) so we never launch the wrong one.
 pub fn find_device(query: &str) -> Result<Device> {
-  let mut matches: Vec<Device> = list_android_emulators()
+  let all = list_android_emulators()
     .unwrap_or_default()
     .into_iter()
     .chain(list_ios_simulators().unwrap_or_default())
+    .collect();
+  select_device(all, query)
+}
+
+/// Pick the one device in `candidates` whose name or id equals `query`.
+fn select_device(candidates: Vec<Device>, query: &str) -> Result<Device> {
+  let mut matches: Vec<Device> = candidates
+    .into_iter()
     .filter(|d| d.name == query || d.id == query)
     .collect();
 
