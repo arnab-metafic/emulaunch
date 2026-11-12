@@ -54,9 +54,12 @@ cargo clippy --all-targets -- -D warnings
 
 # Format code (2-space indentation via rustfmt.toml)
 cargo fmt
+
+# Run the unit tests (CI runs them on Linux, macOS and Windows)
+cargo test
 ```
 
-**No test suite exists.** There are no unit or integration tests in this project.
+**Tests** are unit tests in `#[cfg(test)]` modules next to the code. They need no emulators, `adb` or Xcode: parsing of tool output (`adb`, `simctl`, `config.ini`) and the TUI state machine (`App::handle_key`) are separated from process execution so they can be tested with plain strings. Keep it that way: put new parsing in a function that takes text, and test that. Tests that need files use a self-cleaning temp dir; avoid tests that change environment variables (they run in parallel).
 
 ## Architecture
 
