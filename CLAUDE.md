@@ -113,8 +113,8 @@ The `open` command matches against both `name` (display name) and `id`/`udid` va
 - ratatui + crossterm for terminal UI
 - clap for CLI argument parsing
 - Scrollable list with section headers
-- Real-time fuzzy filtering by typing
-- `j/k`/arrows to navigate, `Enter` to launch, `q/Esc` to quit
+- Real-time substring filtering by typing (every printable key goes into the filter)
+- Arrows or `Ctrl+N`/`Ctrl+P` to navigate, `Enter` to launch, `Ctrl+R`/`F5` to refresh, `?`/`F1` for help, `Esc`/`Ctrl+C` to quit
 
 ### Platform Guards
 
