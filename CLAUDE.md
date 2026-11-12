@@ -104,7 +104,7 @@ Running AVDs are detected via `adb devices` + `adb -s serial emu avd name` to ge
 ### Opening Logic
 
 - **Android**: `emulator -avd <name>` spawns the emulator process (uses `id` field)
-- **iOS**: `xcrun simctl boot <udid>` boots, then `open -a Simulator` opens GUI
+- **iOS**: `xcrun simctl boot <udid>` boots, then the GUI is opened by bundle id: Simulator.app (`com.apple.iphonesimulator`, with `-CurrentDeviceUDID`) on older Xcode, falling back to Device Hub (`com.apple.dt.Devices`) on Xcode 27+, which no longer ships Simulator.app
 
 The `open` command matches against both `name` (display name) and `id`/`udid` values, so either identifier can be used.
 

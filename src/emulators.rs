@@ -463,6 +463,34 @@ pub fn open_android_emulator(avd: &str) -> Result<String, String> {
   ))
 }
 
+/// Bring up the app that displays booted simulators and report whether one
+/// could be opened.
+///
+/// Xcode 27 replaced Simulator.app with Device Hub, so try Simulator.app
+/// first (older Xcode; it honours -CurrentDeviceUDID when it is not already
+/// running) and fall back to Device Hub, which we cannot point at a device.
+/// Apps are addressed by bundle identifier because the app name differs.
+#[cfg(target_os = "macos")]
+fn open_simulator_ui(udid: &str) -> bool {
+  let open = |args: &[&str]| {
+    std::process::Command::new("open")
+      .args(args)
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .status()
+      .map(|s| s.success())
+      .unwrap_or(false)
+  };
+  open(&[
+    "-b",
+    "com.apple.iphonesimulator",
+    "--args",
+    "-CurrentDeviceUDID",
+    udid,
+  ]) || open(&["-b", "com.apple.dt.Devices"])
+}
+
 #[cfg(target_os = "macos")]
 pub fn open_ios_simulator(udid: &str) -> Result<String, String> {
   let xcrun = get_xcrun_cmd()?;
@@ -486,14 +514,14 @@ pub fn open_ios_simulator(udid: &str) -> Result<String, String> {
     Err(e) => return Err(format!("Failed to run simctl boot: {}", e)),
   }
 
-  let _ = std::process::Command::new("open")
-    .args(["-a", "Simulator"])
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .spawn();
-
-  Ok(format!("Opening iOS simulator: {}", udid))
+  if open_simulator_ui(udid) {
+    Ok(format!("Opening iOS simulator: {}", udid))
+  } else {
+    Ok(format!(
+      "Booted iOS simulator: {} (could not open Simulator or Device Hub)",
+      udid
+    ))
+  }
 }
 
 #[cfg(not(target_os = "macos"))]
